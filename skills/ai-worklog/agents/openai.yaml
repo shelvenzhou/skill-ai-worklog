@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Worklog"
+  short_description: "Install Codex and Cursor hooks for AI-assisted work records"
+  default_prompt: "Use $ai-worklog to install and enable full AI worklog collection for both Codex and Cursor."
