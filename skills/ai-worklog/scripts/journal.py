@@ -61,6 +61,54 @@ ENVELOPE_KEYS = {
     "workspace_path",
     "workspacePath",
 }
+CODE_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".clj",
+    ".cljs",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".dart",
+    ".ex",
+    ".exs",
+    ".go",
+    ".h",
+    ".hpp",
+    ".html",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".lua",
+    ".m",
+    ".mm",
+    ".php",
+    ".pl",
+    ".py",
+    ".rb",
+    ".rs",
+    ".scala",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".vue",
+}
+CODE_FILENAMES = {
+    "Dockerfile",
+    "Makefile",
+    "Rakefile",
+    "Gemfile",
+    "go.mod",
+    "go.sum",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "tsconfig.json",
+}
 
 
 def utc_now() -> str:
@@ -230,6 +278,118 @@ def git_metadata(cwd: str | None) -> dict[str, Any] | None:
     }
 
 
+def is_code_path(path: str | None) -> bool:
+    if not path:
+        return False
+    name = Path(path).name
+    if name in CODE_FILENAMES:
+        return True
+    return Path(path).suffix.lower() in CODE_EXTENSIONS
+
+
+def count_text_lines(path: Path, max_bytes: int = 2 * 1024 * 1024) -> int | None:
+    try:
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            return None
+        data = path.read_bytes()
+    except Exception:
+        return None
+    if b"\0" in data:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def git_workspace_diff(cwd: str | None) -> dict[str, Any] | None:
+    if not cwd:
+        return None
+    path = Path(cwd).expanduser()
+    if not path.exists():
+        return None
+
+    def run_git(args: list[str]) -> subprocess.CompletedProcess[str] | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(path),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=3.0,
+            )
+        except Exception:
+            return None
+        return result if result.returncode == 0 else None
+
+    root_result = run_git(["rev-parse", "--show-toplevel"])
+    if not root_result or not root_result.stdout.strip():
+        return None
+    root = Path(root_result.stdout.strip())
+
+    files: list[dict[str, Any]] = []
+    diff_result = run_git(["diff", "--numstat", "HEAD", "--"])
+    if diff_result:
+        for line in diff_result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            additions_raw, deletions_raw, file_path = parts[0], parts[1], parts[2]
+            binary = additions_raw == "-" or deletions_raw == "-"
+            additions = 0 if binary else int(additions_raw)
+            deletions = 0 if binary else int(deletions_raw)
+            files.append(
+                {
+                    "path": file_path,
+                    "additions": additions,
+                    "deletions": deletions,
+                    "binary": binary,
+                    "untracked": False,
+                    "is_code": is_code_path(file_path),
+                }
+            )
+
+    untracked_result = run_git(["ls-files", "--others", "--exclude-standard", "-z"])
+    if untracked_result and untracked_result.stdout:
+        for file_path in [item for item in untracked_result.stdout.split("\0") if item]:
+            full_path = root / file_path
+            line_count = count_text_lines(full_path)
+            if line_count is None:
+                continue
+            files.append(
+                {
+                    "path": file_path,
+                    "additions": line_count,
+                    "deletions": 0,
+                    "binary": False,
+                    "untracked": True,
+                    "is_code": is_code_path(file_path),
+                }
+            )
+
+    def totals(items: list[dict[str, Any]]) -> dict[str, int]:
+        return {
+            "files": len(items),
+            "additions": sum(int(item.get("additions") or 0) for item in items),
+            "deletions": sum(int(item.get("deletions") or 0) for item in items),
+        }
+
+    code_files = [item for item in files if item.get("is_code")]
+    return {
+        "source": "git_diff_head_numstat",
+        "captured_at": utc_now(),
+        "git_root": str(root),
+        "includes_staged": True,
+        "includes_unstaged": True,
+        "includes_untracked": True,
+        "files": files,
+        "totals": totals(files),
+        "code_totals": totals(code_files),
+    }
+
+
 def environment_metadata(cwd: str | None) -> dict[str, Any]:
     return {
         "os": platform.platform(),
@@ -377,6 +537,11 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
 
     if level == "full" and cfg.get("capture", {}).get("raw_hook_input", True):
         event["raw_hook_input"] = scrub_sensitive(event_specific_payload(payload))
+
+    if hook_event_name in {"Stop", "stop", "sessionEnd", "SessionEnd", "session_end"}:
+        workspace_diff = git_workspace_diff(str(cwd) if cwd else None)
+        if workspace_diff is not None:
+            event["workspace_diff"] = workspace_diff
 
     snapshots = [
         {

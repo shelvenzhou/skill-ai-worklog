@@ -86,8 +86,14 @@ Event records are written one per hook event:
 - `usage`: best-effort `token_count` info from transcript or hook payload
 - `environment_ref` and `session_ref`: stable hashes that point to snapshot records
 - `raw_hook_input`: present only at `full`, with common envelope keys removed
+- `workspace_diff`: present on `Stop` / `sessionEnd` when the workspace is a git repo; stores compact numstat-style line counts, not full diff bodies
 
 Snapshot records are written once per environment hash and once per session id. They contain model, cwd, transcript path, user email, OS, hostname, git root/branch/commit/dirty state, and other global metadata that would otherwise repeat on every event.
+
+The collector server also exposes `GET /metrics/code` for post-processed code metrics:
+
+- `generated_code`: weak definition, parsed from successful post-write patch/file-edit payloads.
+- `adopted_code`: medium definition, latest session-end `git diff HEAD` code line counts still present in the worktree.
 
 ## Operations
 

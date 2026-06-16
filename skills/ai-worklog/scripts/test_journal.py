@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,44 @@ class JournalTests(unittest.TestCase):
             second = journal.write_new_snapshots(snapshots, cfg)
             self.assertEqual(len(first), 2)
             self.assertEqual(len(second), 0)
+
+    def test_stop_event_records_workspace_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            (repo / "app.py").write_text("old = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "init",
+                ],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            (repo / "app.py").write_text("old = 1\nnew = 2\n", encoding="utf-8")
+            (repo / "new.ts").write_text("export const value = 1;\n", encoding="utf-8")
+            event, _ = journal.build_records(
+                {"hook_event_name": "Stop", "session_id": "s1", "cwd": str(repo)},
+                journal.default_config(),
+                "codex",
+                "test",
+            )
+            assert event is not None
+            self.assertIn("workspace_diff", event)
+            paths = {item["path"]: item for item in event["workspace_diff"]["files"]}
+            self.assertEqual(paths["app.py"]["additions"], 1)
+            self.assertTrue(paths["app.py"]["is_code"])
+            self.assertEqual(paths["new.ts"]["additions"], 1)
+            self.assertTrue(paths["new.ts"]["untracked"])
 
 
 if __name__ == "__main__":

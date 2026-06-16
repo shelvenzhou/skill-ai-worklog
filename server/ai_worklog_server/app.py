@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .metrics import compute_code_metrics
 from .storage import WorklogStore
 
 
@@ -65,6 +66,16 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/stats":
             write_json(self, HTTPStatus.OK, self.store.stats())
+            return
+
+        if parsed.path == "/metrics/code":
+            query = parse_qs(parsed.query)
+            records = self.store.query_records_for_metrics(
+                record_type="event",
+                surface=(query.get("surface") or [None])[0],
+                session_id=(query.get("session_id") or [None])[0],
+            )
+            write_json(self, HTTPStatus.OK, compute_code_metrics(records))
             return
 
         if parsed.path == "/records":

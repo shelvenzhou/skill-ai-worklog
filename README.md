@@ -79,6 +79,7 @@ python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 - `POST /events`: accepts one JSON record, a JSON array of records, or NDJSON.
 - `GET /records?limit=50&record_type=event&surface=codex&session_id=...`: recent indexed records.
 - `GET /stats`: aggregate counts and token totals.
+- `GET /metrics/code?surface=codex&session_id=...`: post-processed generated/adopted code line metrics.
 
 ## Data Layout
 
@@ -92,6 +93,21 @@ The client writes:
 - `~/.ai-worklog/events/YYYY-MM-DD.jsonl`: local per-interaction records.
 - `~/.ai-worklog/snapshots/YYYY-MM-DD.jsonl`: deduplicated environment/session snapshots.
 - `~/.ai-worklog/failed/YYYY-MM-DD.jsonl`: upload failures for later replay.
+
+## Code Metrics
+
+The collector includes a post-processing code metrics endpoint:
+
+```bash
+curl 'http://127.0.0.1:8765/metrics/code'
+```
+
+Current metric definitions:
+
+- `generated_code`: weak definition. Counts code additions/deletions parsed from successful post-write hook payloads such as patch/file-edit tool inputs. Assistant response code blocks are not counted unless they appear in a write/patch payload.
+- `adopted_code`: medium definition. Counts code additions/deletions still present in the latest session-end workspace `git diff HEAD` snapshot. This is not proof that code was committed or merged.
+
+To support `adopted_code`, the client records a compact `workspace_diff` numstat snapshot on `Stop` / `sessionEnd` hooks when the hook payload has a git worktree `cwd`. The snapshot stores file paths and line counts, not full diff bodies.
 
 ## Validation
 

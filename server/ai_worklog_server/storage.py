@@ -210,6 +210,32 @@ class WorklogStore:
             rows = conn.execute(sql, args).fetchall()
         return [json.loads(row["raw_json"]) for row in rows]
 
+    def query_records_for_metrics(
+        self,
+        *,
+        record_type: str | None = None,
+        surface: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        args: list[Any] = []
+        if record_type:
+            where.append("record_type = ?")
+            args.append(record_type)
+        if surface:
+            where.append("surface = ?")
+            args.append(surface)
+        if session_id:
+            where.append("session_id = ?")
+            args.append(session_id)
+        sql = "select raw_json from records"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by ingested_at asc"
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [json.loads(row["raw_json"]) for row in rows]
+
     def stats(self) -> dict[str, Any]:
         with self._connect() as conn:
             total = conn.execute("select count(*) as count from records").fetchone()["count"]
