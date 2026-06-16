@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from .metrics import compute_code_metrics
-from .storage import token_usage
+from .storage import token_totals
 
 
 def record_time(record: dict[str, Any]) -> str:
@@ -14,21 +14,6 @@ def record_time(record: dict[str, Any]) -> str:
 def session_key(record: dict[str, Any]) -> str:
     value = record.get("session_id")
     return str(value) if value not in (None, "") else "unknown"
-
-
-def token_totals(records: list[dict[str, Any]]) -> dict[str, int]:
-    totals = {
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_output_tokens": 0,
-        "total_tokens": 0,
-    }
-    for record in records:
-        usage = token_usage(record)
-        for key in totals:
-            totals[key] += int(usage.get(key) or 0)
-    return totals
 
 
 def nested_dict(record: dict[str, Any], key: str) -> dict[str, Any]:

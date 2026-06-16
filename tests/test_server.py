@@ -79,6 +79,40 @@ class StoreTests(unittest.TestCase):
             )
             self.assertEqual(store.stats()["token_totals"]["total_tokens"], 5)
 
+    def test_stats_deduplicate_repeated_transcript_token_usage(self) -> None:
+        usage = {
+            "source": "transcript_token_count",
+            "timestamp": "2026-06-16T00:00:00Z",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            store.insert_many(
+                [
+                    {
+                        "record_type": "event",
+                        "event_id": "e1",
+                        "session_id": "s1",
+                        "hook_event_name": "PostToolUse",
+                        "usage": usage,
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "e2",
+                        "session_id": "s1",
+                        "hook_event_name": "Stop",
+                        "usage": usage,
+                    },
+                ]
+            )
+            self.assertEqual(store.stats()["token_totals"]["total_tokens"], 15)
+
     def test_queries_events_and_snapshots_for_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WorklogStore(Path(tmp))
@@ -259,6 +293,26 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["timeline"][0]["category"], "tool")
         self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")
         self.assertEqual(detail["process"]["skill_counts"]["code-fix"], 1)
+
+    def test_session_token_totals_deduplicate_repeated_transcript_usage(self) -> None:
+        usage = {
+            "source": "transcript_token_count",
+            "timestamp": "2026-06-16T00:00:00Z",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3,
+                }
+            },
+        }
+        index = build_sessions_index(
+            [
+                {"record_type": "event", "event_id": "e1", "session_id": "s1", "usage": usage},
+                {"record_type": "event", "event_id": "e2", "session_id": "s1", "usage": usage},
+            ]
+        )
+        self.assertEqual(index["sessions"][0]["token_totals"]["total_tokens"], 3)
 
 
 class AppEndpointTests(unittest.TestCase):

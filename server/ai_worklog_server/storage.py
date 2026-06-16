@@ -84,6 +84,47 @@ def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
     }
 
 
+def token_usage_identity(record: dict[str, Any]) -> str | None:
+    tokens = token_usage(record)
+    if all(value is None for value in tokens.values()):
+        return None
+
+    usage = record.get("usage")
+    usage_timestamp = usage.get("timestamp") if isinstance(usage, dict) else None
+    usage_turn = (usage.get("turn_id") or usage.get("turnId")) if isinstance(usage, dict) else None
+    turn_or_timestamp = usage_timestamp or usage_turn or record.get("turn_id") or record.get("turnId")
+    if not turn_or_timestamp:
+        return record_pk(record)
+
+    return "|".join(
+        [
+            str(record.get("session_id") or "unknown"),
+            str(turn_or_timestamp),
+            stable_hash(tokens),
+        ]
+    )
+
+
+def token_totals(records: list[dict[str, Any]]) -> dict[str, int]:
+    totals = {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 0,
+    }
+    seen_usage: set[str] = set()
+    for record in records:
+        identity = token_usage_identity(record)
+        if identity is None or identity in seen_usage:
+            continue
+        seen_usage.add(identity)
+        usage = token_usage(record)
+        for key in totals:
+            totals[key] += int(usage.get(key) or 0)
+    return totals
+
+
 def record_pk(record: dict[str, Any]) -> str:
     event_id = record.get("event_id")
     if event_id:
@@ -294,21 +335,12 @@ class WorklogStore:
                 limit 50
                 """
             ).fetchall()
-            token_row = conn.execute(
-                """
-                select
-                  coalesce(sum(input_tokens), 0) as input_tokens,
-                  coalesce(sum(cached_input_tokens), 0) as cached_input_tokens,
-                  coalesce(sum(output_tokens), 0) as output_tokens,
-                  coalesce(sum(reasoning_output_tokens), 0) as reasoning_output_tokens,
-                  coalesce(sum(total_tokens), 0) as total_tokens
-                from records
-                """
-            ).fetchone()
+            raw_rows = conn.execute("select raw_json from records order by ingested_at asc").fetchall()
+        totals = token_totals([json.loads(row["raw_json"]) for row in raw_rows])
         return {
             "total_records": int(total),
             "by_record_type": {row["key"]: int(row["count"]) for row in by_type},
             "by_surface": {row["key"]: int(row["count"]) for row in by_surface},
             "by_hook_event_name": {row["key"]: int(row["count"]) for row in by_hook},
-            "token_totals": {key: int(token_row[key]) for key in token_row.keys()},
+            "token_totals": totals,
         }
