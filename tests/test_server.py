@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 from server.ai_worklog_server.analysis import build_session_detail, build_sessions_index
-from server.ai_worklog_server.app import build_server, parse_records
+from server.ai_worklog_server.app import build_server, parse_record_pks, parse_records
 from server.ai_worklog_server.metrics import compute_code_metrics
 from server.ai_worklog_server.storage import WorklogStore
 
@@ -18,6 +18,10 @@ class ParseRecordsTests(unittest.TestCase):
         self.assertEqual(parse_records(b'{"record_type":"event"}', "application/json")[0]["record_type"], "event")
         self.assertEqual(len(parse_records(b'[{"record_type":"event"},{"record_type":"snapshot"}]', "application/json")), 2)
         self.assertEqual(len(parse_records(b'{"record_type":"event"}\n{"record_type":"snapshot"}\n', "application/x-ndjson")), 2)
+
+    def test_parse_record_pks(self) -> None:
+        self.assertEqual(parse_record_pks(b'{"record_pks":["event:e1"]}'), ["event:e1"])
+        self.assertEqual(parse_record_pks(b'["snapshot:s1"]'), ["snapshot:s1"])
 
 
 class StoreTests(unittest.TestCase):
@@ -50,6 +54,7 @@ class StoreTests(unittest.TestCase):
             stats = store.stats()
             self.assertEqual(stats["by_surface"], {"codex": 1})
             self.assertEqual(stats["token_totals"]["total_tokens"], 16)
+            self.assertEqual(store.existing_record_pks(["event:e1", "event:e2"]), {"event:e1"})
             raw_files = list((Path(tmp) / "raw").glob("*.jsonl"))
             self.assertEqual(len(raw_files), 1)
             self.assertEqual(json.loads(raw_files[0].read_text(encoding="utf-8").splitlines()[0])["event_id"], "e1")
@@ -303,6 +308,17 @@ class AppEndpointTests(unittest.TestCase):
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     self.assertEqual(response.status, 202)
+
+                exists_request = urllib.request.Request(
+                    f"{base_url}/events/exists",
+                    data=json.dumps({"record_pks": ["event:e1", "event:missing", "snapshot:env1"]}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(exists_request, timeout=5) as response:
+                    exists = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(exists["existing"], ["event:e1", "snapshot:env1"])
+                self.assertEqual(exists["missing"], ["event:missing"])
 
                 with urllib.request.urlopen(f"{base_url}/sessions", timeout=5) as response:
                     sessions = json.loads(response.read().decode("utf-8"))

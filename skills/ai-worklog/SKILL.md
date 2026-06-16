@@ -162,6 +162,12 @@ python3 ~/.codex/skills/ai-worklog/scripts/dev_server.py --port 8765
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --server-url http://127.0.0.1:8765/events
 ```
 
+Upload preflight is enabled by default. Before sending a full event or snapshot payload, the hook asks the collector `POST /events/exists` with the record primary key only. If the collector says the record already exists, the hook skips the full upload. Disable this compatibility path only when needed:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --no-upload-preflight
+```
+
 Run the bundled collector server from the repository root:
 
 ```bash

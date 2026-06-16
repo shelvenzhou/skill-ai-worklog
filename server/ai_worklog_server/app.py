@@ -39,6 +39,22 @@ def parse_records(body: bytes, content_type: str) -> list[dict[str, Any]]:
     raise ValueError("request body must be a JSON object, array, or NDJSON")
 
 
+def parse_record_pks(body: bytes) -> list[str]:
+    text = body.decode("utf-8")
+    if not text.strip():
+        return []
+    item = json.loads(text)
+    if isinstance(item, list):
+        values = item
+    elif isinstance(item, dict):
+        values = item.get("record_pks")
+    else:
+        raise ValueError("request body must be a JSON object or array")
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise ValueError("record_pks must be an array of strings")
+    return values
+
+
 def write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any] | list[Any]) -> None:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     handler.send_response(status)
@@ -122,7 +138,7 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/events":
+        if parsed.path not in {"/events", "/events/exists"}:
             write_json(self, HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         if not self.authorized():
@@ -131,6 +147,24 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
         length = int(self.headers.get("Content-Length") or "0")
         body = self.rfile.read(length)
+
+        if parsed.path == "/events/exists":
+            try:
+                record_pks = parse_record_pks(body)
+            except Exception as exc:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            existing = self.store.existing_record_pks(record_pks)
+            write_json(
+                self,
+                HTTPStatus.OK,
+                {
+                    "existing": [key for key in record_pks if key in existing],
+                    "missing": [key for key in record_pks if key not in existing],
+                },
+            )
+            return
+
         try:
             records = parse_records(body, self.headers.get("Content-Type") or "")
         except Exception as exc:

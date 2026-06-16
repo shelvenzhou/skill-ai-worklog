@@ -239,6 +239,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
             "server_url": args.server_url,
             "api_key_env": args.api_key_env,
             "request_timeout_seconds": args.timeout,
+            "upload_preflight": not args.no_upload_preflight,
             "max_transcript_bytes": args.max_transcript_bytes,
             "hook_set": args.hook_set,
         }
@@ -392,6 +393,7 @@ def main() -> int:
     parser.add_argument("--snapshot-log-dir", default=str(CONFIG_HOME / "snapshots"))
     parser.add_argument("--failed-log-dir", default=str(CONFIG_HOME / "failed"))
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--no-upload-preflight", action="store_true", help="Upload records directly without checking /events/exists first.")
     parser.add_argument("--max-transcript-bytes", type=int, default=5 * 1024 * 1024)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

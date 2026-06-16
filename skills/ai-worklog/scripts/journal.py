@@ -135,6 +135,7 @@ def default_config() -> dict[str, Any]:
         "server_url": None,
         "api_key_env": "AI_WORKLOG_API_KEY",
         "request_timeout_seconds": 2.0,
+        "upload_preflight": True,
         "max_transcript_bytes": DEFAULT_MAX_TRANSCRIPT_BYTES,
         "capture": {
             "raw_hook_input": True,
@@ -183,6 +184,16 @@ def sha256_text(value: str) -> str:
 
 def stable_hash(value: Any) -> str:
     return sha256_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def record_pk(record: dict[str, Any]) -> str:
+    event_id = record.get("event_id")
+    if event_id:
+        return f"event:{event_id}"
+    snapshot_id = record.get("snapshot_id")
+    if snapshot_id:
+        return f"snapshot:{snapshot_id}"
+    return f"hash:{stable_hash(record)}"
 
 
 def is_sensitive_key(key: str) -> bool:
@@ -848,10 +859,7 @@ def assign_event_sequence(event: dict[str, Any], cfg: dict[str, Any]) -> None:
     save_state(path, state)
 
 
-def upload_event(event: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, str | None]:
-    server_url = cfg.get("server_url")
-    if not server_url:
-        return True, None
+def upload_headers(cfg: dict[str, Any]) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "X-AI-Worklog-Version": VERSION,
@@ -859,8 +867,52 @@ def upload_event(event: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, str 
     api_key_env = cfg.get("api_key_env")
     if api_key_env and os.environ.get(str(api_key_env)):
         headers["Authorization"] = f"Bearer {os.environ[str(api_key_env)]}"
+    return headers
+
+
+def preflight_url(server_url: str) -> str:
+    base = server_url.rstrip("/")
+    if base.endswith("/events"):
+        return f"{base}/exists"
+    return f"{base}/events/exists"
+
+
+def server_has_record(record: dict[str, Any], cfg: dict[str, Any]) -> bool:
+    if not cfg.get("upload_preflight", True):
+        return False
+    server_url = cfg.get("server_url")
+    if not server_url:
+        return False
+    payload = {"record_pks": [record_pk(record)]}
+    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    request = urllib.request.Request(
+        preflight_url(str(server_url)),
+        data=data,
+        headers=upload_headers(cfg),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=float(cfg.get("request_timeout_seconds") or 2.0),
+        ) as response:
+            if not (200 <= response.status < 300):
+                return False
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return False
+    existing = result.get("existing") if isinstance(result, dict) else None
+    return isinstance(existing, list) and record_pk(record) in existing
+
+
+def upload_event(event: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, str | None]:
+    server_url = cfg.get("server_url")
+    if not server_url:
+        return True, None
+    if server_has_record(event, cfg):
+        return True, None
     data = json.dumps(event, ensure_ascii=False, default=str).encode("utf-8")
-    request = urllib.request.Request(str(server_url), data=data, headers=headers, method="POST")
+    request = urllib.request.Request(str(server_url), data=data, headers=upload_headers(cfg), method="POST")
     try:
         with urllib.request.urlopen(
             request,

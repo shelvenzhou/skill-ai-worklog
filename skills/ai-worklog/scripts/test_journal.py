@@ -141,6 +141,39 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(len(first), 2)
             self.assertEqual(len(second), 0)
 
+    def test_upload_preflight_skips_existing_record(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"existing":["event:e1"],"missing":[]}'
+
+        requests = []
+        original_urlopen = journal.urllib.request.urlopen
+
+        def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+            requests.append(request)
+            return FakeResponse()
+
+        try:
+            journal.urllib.request.urlopen = fake_urlopen
+            cfg = journal.default_config()
+            cfg["server_url"] = "http://127.0.0.1:8765/events"
+            ok, error = journal.upload_event({"record_type": "event", "event_id": "e1"}, cfg)
+        finally:
+            journal.urllib.request.urlopen = original_urlopen
+
+        self.assertTrue(ok)
+        self.assertIsNone(error)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].full_url, "http://127.0.0.1:8765/events/exists")
+
     def test_stop_event_records_workspace_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

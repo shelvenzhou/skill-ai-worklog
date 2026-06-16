@@ -101,6 +101,7 @@ path that removes stale entries from Codex/Cursor hook config.
 
 - `GET /healthz`: health check and record count.
 - `POST /events`: accepts one JSON record, a JSON array of records, or NDJSON.
+- `POST /events/exists`: accepts `{"record_pks":["event:..."]}` and returns existing/missing keys for preflight upload negotiation.
 - `GET /records?limit=50&record_type=event&surface=codex&session_id=...`: recent indexed records.
 - `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, process/tool/skill counts, token totals, and code metrics.
 - `GET /sessions/<session_id>?limit=200&surface=codex`: chronological session events, compact timeline, snapshots, process summary, and session code metrics.

@@ -177,6 +177,16 @@ class WorklogStore:
                 duplicates += 1
         return {"accepted": accepted, "duplicates": duplicates}
 
+    def existing_record_pks(self, record_pks: list[str]) -> set[str]:
+        keys = sorted({str(key) for key in record_pks if key})
+        if not keys:
+            return set()
+        placeholders = ",".join("?" for _ in keys)
+        sql = f"select record_pk from records where record_pk in ({placeholders})"
+        with self._connect() as conn:
+            rows = conn.execute(sql, keys).fetchall()
+        return {str(row["record_pk"]) for row in rows}
+
     def count_records(self) -> int:
         with self._connect() as conn:
             row = conn.execute("select count(*) as count from records").fetchone()
