@@ -127,7 +127,7 @@ Replay local backlog after downtime or first-time rollout:
 python3 ~/.codex/skills/ai-worklog/scripts/replay.py --server-url http://127.0.0.1:8765/events --batch-size 100
 ```
 
-`replay.py` reads local snapshots, events, and failed uploads in that order, strips failed-upload metadata, deduplicates by record key, calls `/events/exists` in batches, and uploads missing records to `/events` as JSON arrays.
+`replay.py` reads local snapshots, events, and failed uploads in that order, strips failed-upload metadata, deduplicates by record key, calls `/events/exists` in batches, and uploads missing records to `/events` as JSON arrays. Successful uploads and server-confirmed existing records are cached in `~/.ai-worklog/upload_state.sqlite3` by `collector_url + record_pk`; reruns skip locally confirmed records before touching the server. Use `--force` to ignore the local upload ledger and let the server deduplicate again after collector restore, migration, or suspected local state drift.
 
 ## Server Analysis
 

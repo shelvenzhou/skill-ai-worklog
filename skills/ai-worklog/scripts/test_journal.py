@@ -222,6 +222,22 @@ class JournalTests(unittest.TestCase):
 
 
 class ReplayTests(unittest.TestCase):
+    def write_replay_event(self, root: Path) -> dict[str, object]:
+        cfg = journal.default_config()
+        cfg["snapshot_log_dir"] = str(root / "snapshots")
+        cfg["local_log_dir"] = str(root / "events")
+        cfg["failed_log_dir"] = str(root / "failed")
+        cfg["upload_state_path"] = str(root / "upload_state.sqlite3")
+        cfg["server_url"] = "http://collector.example/events"
+        (root / "snapshots").mkdir()
+        (root / "events").mkdir()
+        (root / "failed").mkdir()
+        (root / "events" / "2026-06-16.jsonl").write_text(
+            json.dumps({"record_type": "event", "event_id": "e1"}) + "\n",
+            encoding="utf-8",
+        )
+        return cfg
+
     def test_load_replay_records_orders_snapshots_first_and_deduplicates_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -255,6 +271,63 @@ class ReplayTests(unittest.TestCase):
             records = replay.load_replay_records(cfg)
             self.assertEqual([journal.record_pk(record) for record in records], ["snapshot:s1", "event:e1", "event:e2"])
             self.assertNotIn("upload_failed_at", records[2])
+
+    def test_replay_records_successful_uploads_in_local_ledger(self) -> None:
+        calls = {"preflight": 0, "upload": 0}
+        original_existing = replay.existing_record_pks
+        original_upload = replay.upload_records
+
+        def fake_existing(record_pks: list[str], cfg: dict[str, object]) -> set[str]:
+            calls["preflight"] += 1
+            return set()
+
+        def fake_upload(records: list[dict[str, object]], cfg: dict[str, object]) -> dict[str, int]:
+            calls["upload"] += 1
+            return {"accepted": len(records), "duplicates": 0}
+
+        try:
+            replay.existing_record_pks = fake_existing
+            replay.upload_records = fake_upload
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self.write_replay_event(Path(tmp))
+                first = replay.replay(cfg, batch_size=100)
+                second = replay.replay(cfg, batch_size=100)
+        finally:
+            replay.existing_record_pks = original_existing
+            replay.upload_records = original_upload
+
+        self.assertEqual(first["attempted"], 1)
+        self.assertEqual(second["skipped_local"], 1)
+        self.assertEqual(second["attempted"], 0)
+        self.assertEqual(calls, {"preflight": 1, "upload": 1})
+
+    def test_replay_force_ignores_local_ledger(self) -> None:
+        calls = {"preflight": 0, "upload": 0}
+        original_existing = replay.existing_record_pks
+        original_upload = replay.upload_records
+
+        def fake_existing(record_pks: list[str], cfg: dict[str, object]) -> set[str]:
+            calls["preflight"] += 1
+            return set()
+
+        def fake_upload(records: list[dict[str, object]], cfg: dict[str, object]) -> dict[str, int]:
+            calls["upload"] += 1
+            return {"accepted": len(records), "duplicates": 0}
+
+        try:
+            replay.existing_record_pks = fake_existing
+            replay.upload_records = fake_upload
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self.write_replay_event(Path(tmp))
+                replay.replay(cfg, batch_size=100)
+                forced = replay.replay(cfg, batch_size=100, force=True)
+        finally:
+            replay.existing_record_pks = original_existing
+            replay.upload_records = original_upload
+
+        self.assertEqual(forced["skipped_local"], 0)
+        self.assertEqual(forced["attempted"], 1)
+        self.assertEqual(calls, {"preflight": 2, "upload": 2})
 
 
 if __name__ == "__main__":

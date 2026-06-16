@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import urllib.error
 import urllib.request
@@ -66,6 +67,70 @@ def chunks(records: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, 
         yield records[index : index + bounded]
 
 
+def upload_state_path(cfg: dict[str, Any]) -> Path:
+    explicit = cfg.get("upload_state_path")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    return journal.DEFAULT_HOME / "upload_state.sqlite3"
+
+
+def collector_key(cfg: dict[str, Any]) -> str:
+    server_url = cfg.get("server_url")
+    if not server_url:
+        raise ValueError("server_url is required; pass --server-url or set AI_WORKLOG_SERVER_URL")
+    return str(server_url).rstrip("/")
+
+
+class UploadLedger:
+    def __init__(self, path: Path) -> None:
+        self.path = path.expanduser()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(str(self.path))
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                create table if not exists uploaded_records (
+                  collector_url text not null,
+                  record_pk text not null,
+                  uploaded_at text not null,
+                  primary key (collector_url, record_pk)
+                )
+                """
+            )
+
+    def uploaded_pks(self, collector_url: str, record_pks: list[str]) -> set[str]:
+        keys = sorted({str(key) for key in record_pks if key})
+        if not keys:
+            return set()
+        placeholders = ",".join("?" for _ in keys)
+        sql = f"""
+            select record_pk from uploaded_records
+            where collector_url = ? and record_pk in ({placeholders})
+        """
+        with self._connect() as conn:
+            rows = conn.execute(sql, [collector_url, *keys]).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def mark_uploaded(self, collector_url: str, record_pks: Iterable[str]) -> None:
+        keys = sorted({str(key) for key in record_pks if key})
+        if not keys:
+            return
+        uploaded_at = journal.utc_now()
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                insert or replace into uploaded_records (collector_url, record_pk, uploaded_at)
+                values (?, ?, ?)
+                """,
+                [(collector_url, key, uploaded_at) for key in keys],
+            )
+
+
 def existing_record_pks(record_pks: list[str], cfg: dict[str, Any]) -> set[str]:
     if not cfg.get("upload_preflight", True):
         return set()
@@ -90,12 +155,10 @@ def existing_record_pks(record_pks: list[str], cfg: dict[str, Any]) -> set[str]:
 
 
 def upload_records(records: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, int]:
-    server_url = cfg.get("server_url")
-    if not server_url:
-        raise ValueError("server_url is required; pass --server-url or set AI_WORKLOG_SERVER_URL")
+    server_url = collector_key(cfg)
 
     payload = json.dumps(records, ensure_ascii=False, default=str).encode("utf-8")
-    request = urllib.request.Request(str(server_url), data=payload, headers=journal.upload_headers(cfg), method="POST")
+    request = urllib.request.Request(server_url, data=payload, headers=journal.upload_headers(cfg), method="POST")
     with urllib.request.urlopen(request, timeout=float(cfg.get("request_timeout_seconds") or 2.0)) as response:
         if not (200 <= response.status < 300):
             raise RuntimeError(f"upload failed with HTTP {response.status}")
@@ -108,23 +171,37 @@ def upload_records(records: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[s
     }
 
 
-def replay(cfg: dict[str, Any], batch_size: int) -> dict[str, int]:
+def replay(cfg: dict[str, Any], batch_size: int, *, force: bool = False) -> dict[str, int]:
+    collector_url = collector_key(cfg)
+    ledger = UploadLedger(upload_state_path(cfg))
     records = load_replay_records(cfg)
     summary = {
         "scanned": len(records),
+        "skipped_local": 0,
         "skipped_existing": 0,
         "attempted": 0,
         "accepted": 0,
         "duplicates": 0,
     }
     for batch in chunks(records, batch_size):
-        pks = [journal.record_pk(record) for record in batch]
-        existing = existing_record_pks(pks, cfg)
-        missing = [record for record in batch if journal.record_pk(record) not in existing]
-        summary["skipped_existing"] += len(batch) - len(missing)
+        batch_by_pk = {journal.record_pk(record): record for record in batch}
+        pks = list(batch_by_pk.keys())
+        if force:
+            local_uploaded: set[str] = set()
+        else:
+            local_uploaded = ledger.uploaded_pks(collector_url, pks)
+        summary["skipped_local"] += len(local_uploaded)
+        remote_check_pks = [pk for pk in pks if pk not in local_uploaded]
+        if not remote_check_pks:
+            continue
+        existing = existing_record_pks(remote_check_pks, cfg)
+        ledger.mark_uploaded(collector_url, existing)
+        missing = [batch_by_pk[pk] for pk in remote_check_pks if pk not in existing]
+        summary["skipped_existing"] += len(existing)
         if not missing:
             continue
         result = upload_records(missing, cfg)
+        ledger.mark_uploaded(collector_url, [journal.record_pk(record) for record in missing])
         summary["attempted"] += len(missing)
         summary["accepted"] += result["accepted"]
         summary["duplicates"] += result["duplicates"]
@@ -139,13 +216,17 @@ def main() -> int:
     )
     parser.add_argument("--server-url", help="Collector /events endpoint. Overrides config and AI_WORKLOG_SERVER_URL.")
     parser.add_argument("--batch-size", type=int, default=100, help="Records per preflight/upload request.")
+    parser.add_argument("--upload-state", help="Local SQLite upload ledger path. Defaults to ~/.ai-worklog/upload_state.sqlite3.")
+    parser.add_argument("--force", action="store_true", help="Ignore the local upload ledger and let the server deduplicate.")
     args = parser.parse_args()
 
     cfg = journal.merged_config(Path(args.config).expanduser())
     if args.server_url:
         cfg["server_url"] = args.server_url
+    if args.upload_state:
+        cfg["upload_state_path"] = args.upload_state
     try:
-        summary = replay(cfg, args.batch_size)
+        summary = replay(cfg, args.batch_size, force=args.force)
     except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
         print(f"replay failed: {exc}", file=sys.stderr)
         return 1
