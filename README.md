@@ -33,18 +33,31 @@ python3 skills/ai-worklog/scripts/install.py --surface both --level full --serve
 
 ## Teammate Install Prompt
 
-After publishing this repository in an internal location, teammates should only need to paste a short request to an agent:
+This repository's default branch is `master`, and the skill lives under `skills/ai-worklog` rather than at the repo root. For a first-time install, give the agent the exact source location:
 
 ```text
-帮我安装 ai-worklog
+请用 skill-installer 从 GitHub 安装 ai-worklog skill：
+- repo: shelvenzhou/skill-ai-worklog
+- ref: master
+- path: skills/ai-worklog
+
+安装 skill 文件后不要停下；继续用 python3 运行已安装 skill 里的脚本来写入 Codex/Cursor hooks：
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
+
+如果我提供了内网 collector 地址，则给 install.py 增加：
+--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
+
+如果没有提供 collector 地址，先按本地记录模式安装，不要用 <INTRANET_SERVER_URL> 占位符。
 ```
 
-Keep the operational install details in `skills/ai-worklog/SKILL.md` so the agent sees them after installing or activating the skill. Before publishing, replace `<INTRANET_SERVER_URL>` with the internal collector endpoint and decide whether upload auth is required.
+If the skill is already installed at `~/.codex/skills/ai-worklog`, skip the GitHub copy step and run the installed `install.py` directly with `python3`.
 
-The agent-facing default installer command is:
+Keep the operational install details in `skills/ai-worklog/SKILL.md` so the agent sees them after installing or activating the skill. Before publishing, decide whether upload auth is required and document the internal collector endpoint if there is a stable one.
+
+The agent-facing company-internal installer command with upload enabled is:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <INTRANET_SERVER_URL>/events --api-key-env AI_WORKLOG_API_KEY
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
 ```
 
 If upload authentication is required on macOS, persist the token for future Codex/Cursor hook processes before installing or restarting the apps:

@@ -13,11 +13,31 @@ When asked to install or enable this skill, run the installer. Installing the sk
 
 ## Install
 
-When a user asks to install or enable `ai-worklog`, install this skill first, then run the installer from the installed skill path. The default company-internal rollout uses full collection for Codex and Cursor and uploads to the intranet collector:
+When a user asks to install or enable `ai-worklog`, install this skill first, then run the installer from the installed skill path. Installing the skill files only copies instructions and scripts; it does not enable worklog collection until `install.py` writes Codex/Cursor hooks.
+
+If this skill is not installed yet and the user points to the GitHub repository, use these source details with `skill-installer`:
+
+- repo: `shelvenzhou/skill-ai-worklog`
+- ref: `master`
+- path: `skills/ai-worklog`
+
+Do not assume the repository uses `main`, and do not install the repo root as the skill. If `~/.codex/skills/ai-worklog` already exists, skip the copy step and run the installed `install.py` directly.
+
+Run scripts with `python3`; do not rely on executable file permissions surviving the GitHub install path.
+
+Default local install for Codex and Cursor:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <INTRANET_SERVER_URL>/events --api-key-env AI_WORKLOG_API_KEY
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
 ```
+
+Company-internal rollout with upload enabled:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
+```
+
+Only include `--server-url` when the user has provided a real collector endpoint or the internal endpoint is known. If no collector is provided, install local-only by omitting `--server-url`; events still write to `~/.ai-worklog/events`.
 
 If upload requires auth on macOS, persist the token for future Codex/Cursor hook processes before running the installer or before restarting the apps:
 
@@ -104,8 +124,8 @@ python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 Smoke-test upload without a real backend:
 
 ```bash
-python3 .codex/skills/ai-worklog/scripts/dev_server.py --port 8765
-python3 .codex/skills/ai-worklog/scripts/install.py --surface both --server-url http://127.0.0.1:8765/events
+python3 ~/.codex/skills/ai-worklog/scripts/dev_server.py --port 8765
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --server-url http://127.0.0.1:8765/events
 ```
 
 Run the bundled collector server from the repository root:
@@ -119,10 +139,10 @@ python3 -m server.ai_worklog_server --host 127.0.0.1 --port 8765 --data-dir ./da
 After publishing this skill in the internal skill source, teammates should only need a short request like:
 
 ```text
-帮我安装 ai-worklog
+请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog，然后运行 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
 ```
 
-The full installer command, auth instruction, and `diagnostic`/`off` commands are intentionally kept in this skill's `Install` section so the agent sees them when it activates the skill.
+Add `--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY` to that request only when upload to a known collector is required. The full installer command, auth instruction, and `diagnostic`/`off` commands are intentionally kept in this skill's `Install` section so the agent sees them when it activates the skill.
 
 ## Notes
 
