@@ -238,7 +238,98 @@ class CodeMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["adopted_code"]["deletions"], 2)
         self.assertEqual(metrics["adopted_code"]["files"], 2)
         self.assertEqual(metrics["adopted_code"]["sessions"], 1)
+        self.assertEqual(metrics["uncommitted_code"]["additions"], 10)
+        self.assertEqual(metrics["uncommitted_code"]["deletions"], 2)
+        self.assertEqual(metrics["uncommitted_code"]["files"], 2)
         self.assertEqual(metrics["by_session"]["s1"]["latest_workspace_diff_event_id"], "new")
+
+    def test_adopted_code_from_successful_git_commit_uses_commit_summary(self) -> None:
+        patch = """*** Begin Patch
+*** Add File: src/app.py
++print("hello")
++print("world")
+*** Add File: README.md
++# Not code
+*** End Patch
+"""
+        metrics = compute_code_metrics(
+            [
+                {
+                    "record_type": "event",
+                    "event_id": "write",
+                    "session_id": "s1",
+                    "hook_event_name": "PostToolUse",
+                    "operation": {"success": True},
+                    "content": {"tool_input": patch},
+                },
+                {
+                    "record_type": "event",
+                    "event_id": "commit",
+                    "session_id": "s1",
+                    "received_at": "2026-06-16T01:00:00Z",
+                    "hook_event_name": "PostToolUse",
+                    "operation": {"success": True},
+                    "tool": {"name": "Bash", "command": "git commit -m init"},
+                    "content": {
+                        "tool_response": "[main abc123] init\n 2 files changed, 3 insertions(+), 1 deletion(-)\n create mode 100644 src/app.py\n create mode 100644 README.md\n"
+                    },
+                },
+                {
+                    "record_type": "event",
+                    "event_id": "after-commit-write",
+                    "session_id": "s1",
+                    "received_at": "2026-06-16T01:01:00Z",
+                    "hook_event_name": "PostToolUse",
+                    "operation": {"success": True},
+                    "content": {
+                        "tool_input": "*** Begin Patch\n*** Add File: src/later.py\n+print(\"later\")\n*** End Patch\n"
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(metrics["generated_code"]["additions"], 3)
+        self.assertEqual(metrics["adopted_code"]["additions"], 3)
+        self.assertEqual(metrics["adopted_code"]["deletions"], 1)
+        self.assertEqual(metrics["adopted_code"]["files"], 2)
+        self.assertEqual(metrics["adopted_code"]["sessions"], 1)
+        self.assertEqual(metrics["uncommitted_code"]["additions"], 1)
+        self.assertEqual(metrics["uncommitted_code"]["files"], 1)
+        self.assertEqual(metrics["by_session"]["s1"]["uncommitted"]["additions"], 1)
+        self.assertEqual(metrics["by_session"]["s1"]["adoption_source"], "git_commit_summary")
+        self.assertEqual(metrics["by_session"]["s1"]["latest_git_commit_code"]["additions"], 3)
+        self.assertEqual(metrics["by_session"]["s1"]["latest_git_commit_code"]["deletions"], 1)
+        self.assertEqual(metrics["by_session"]["s1"]["latest_git_commit_code"]["files"], 2)
+        self.assertEqual(metrics["by_session"]["s1"]["latest_git_commit_event_id"], "commit")
+
+    def test_adopted_code_from_successful_git_commit_falls_back_to_generated_files(self) -> None:
+        metrics = compute_code_metrics(
+            [
+                {
+                    "record_type": "event",
+                    "event_id": "write",
+                    "session_id": "s1",
+                    "hook_event_name": "PostToolUse",
+                    "operation": {"success": True},
+                    "content": {"tool_input": "*** Begin Patch\n*** Add File: src/app.py\n+print(1)\n*** End Patch\n"},
+                },
+                {
+                    "record_type": "event",
+                    "event_id": "commit",
+                    "session_id": "s1",
+                    "received_at": "2026-06-16T01:00:00Z",
+                    "hook_event_name": "PostToolUse",
+                    "operation": {"success": True},
+                    "tool": {"name": "Bash", "command": "git commit -m init"},
+                    "content": {"tool_response": "[main abc123] init\n"},
+                },
+            ]
+        )
+
+        self.assertEqual(metrics["adopted_code"]["additions"], 1)
+        self.assertEqual(metrics["adopted_code"]["files"], 1)
+        self.assertEqual(metrics["by_session"]["s1"]["latest_git_commit_code"]["additions"], 1)
+        self.assertEqual(metrics["by_session"]["s1"]["adoption_source"], "git_commit_generated_code")
 
 
 class SessionAnalysisTests(unittest.TestCase):
@@ -300,6 +391,7 @@ class SessionAnalysisTests(unittest.TestCase):
         s1 = next(session for session in index["sessions"] if session["session_id"] == "s1")
         self.assertEqual(s1["code_metrics"]["generated_code"]["additions"], 2)
         self.assertEqual(s1["code_metrics"]["adopted_code"]["additions"], 2)
+        self.assertEqual(s1["code_metrics"]["uncommitted_code"]["additions"], 2)
         self.assertEqual(s1["token_totals"]["total_tokens"], 3)
         self.assertEqual(s1["process"]["operation_category_counts"]["tool"], 1)
         self.assertEqual(s1["process"]["tool_counts"]["apply_patch"], 1)
@@ -310,6 +402,7 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["event_count"], 2)
         self.assertEqual(detail["snapshots"]["environment"][0]["snapshot_id"], "env1")
         self.assertEqual(detail["code_metrics"]["generated_code"]["additions"], 2)
+        self.assertEqual(detail["code_metrics"]["uncommitted_code"]["additions"], 2)
         self.assertEqual([event["event_id"] for event in detail["events"]], ["e1", "e2"])
         self.assertEqual(detail["timeline"][0]["category"], "tool")
         self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")
@@ -334,6 +427,83 @@ class SessionAnalysisTests(unittest.TestCase):
             ]
         )
         self.assertEqual(index["sessions"][0]["token_totals"]["total_tokens"], 3)
+
+    def test_session_detail_includes_transcript_agent_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "rollout.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-06-16T01:00:01Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "agent_message",
+                                    "message": "我会先检查工作区。",
+                                    "phase": "commentary",
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-06-16T01:00:02Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "custom_tool_call",
+                                    "status": "completed",
+                                    "call_id": "call_patch",
+                                    "name": "apply_patch",
+                                    "input": "*** Begin Patch\n*** Add File: src/app.py\n+print(1)\n*** End Patch\n",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-06-16T01:00:03Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "patch_apply_end",
+                                    "call_id": "call_patch",
+                                    "success": True,
+                                    "changes": {"src/app.py": {"type": "add"}},
+                                },
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            events = [
+                {
+                    "record_type": "event",
+                    "event_id": "e1",
+                    "received_at": "2026-06-16T01:00:00Z",
+                    "session_id": "s1",
+                    "hook_event_name": "UserPromptSubmit",
+                }
+            ]
+            snapshots = [
+                {
+                    "record_type": "snapshot",
+                    "snapshot_id": "sess1",
+                    "snapshot_type": "session",
+                    "session": {"session_id": "s1", "transcript_path": str(transcript)},
+                }
+            ]
+
+            detail = build_session_detail("s1", events, snapshots)
+            self.assertEqual(len(detail["assistant_messages"]), 1)
+            self.assertEqual(detail["assistant_messages"][0]["content"]["response"], "我会先检查工作区。")
+            self.assertEqual(detail["assistant_messages"][0]["hook_event_name"], "AgentMessage")
+            self.assertEqual(len(detail["transcript_tool_events"]), 1)
+            self.assertEqual(detail["session"]["code_metrics"]["uncommitted_code"]["additions"], 1)
+            self.assertEqual(detail["session"]["code_metrics"]["generated_code"]["additions"], 1)
+            self.assertEqual(
+                [item["hook_event_name"] for item in detail["timeline"]],
+                ["UserPromptSubmit", "AgentMessage", "PostToolUse"],
+            )
 
 
 class AppEndpointTests(unittest.TestCase):
@@ -399,6 +569,7 @@ class AppEndpointTests(unittest.TestCase):
                     sessions = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(sessions["sessions"][0]["session_id"], "s1")
                 self.assertEqual(sessions["sessions"][0]["code_metrics"]["generated_code"]["additions"], 1)
+                self.assertEqual(sessions["sessions"][0]["code_metrics"]["uncommitted_code"]["additions"], 1)
                 self.assertEqual(sessions["sessions"][0]["process"]["tool_counts"]["apply_patch"], 1)
 
                 with urllib.request.urlopen(f"{base_url}/sessions/s1", timeout=5) as response:
@@ -411,6 +582,16 @@ class AppEndpointTests(unittest.TestCase):
                     metrics = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(metrics["generated_code"]["additions"], 1)
                 self.assertEqual(metrics["adopted_code"]["additions"], 1)
+                self.assertEqual(metrics["uncommitted_code"]["additions"], 1)
+
+                with urllib.request.urlopen(f"{base_url}/", timeout=5) as response:
+                    html = response.read().decode("utf-8")
+                    content_type = response.headers.get("Content-Type")
+                self.assertIn("text/html", content_type)
+                self.assertIn("AI Worklog", html)
+                self.assertIn("uncommitted", html)
+                self.assertIn('getJson("/stats")', html)
+                self.assertIn('api("/sessions"', html)
             finally:
                 server.shutdown()
                 server.server_close()

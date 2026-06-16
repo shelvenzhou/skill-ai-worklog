@@ -99,6 +99,7 @@ path that removes stale entries from Codex/Cursor hook config.
 
 ## Endpoints
 
+- `GET /` or `GET /ui`: browser dashboard for stats, sessions, timelines, agent transcript messages, tool payloads, and raw records.
 - `GET /healthz`: health check and record count.
 - `POST /events`: accepts one JSON record, a JSON array of records, or NDJSON.
 - `POST /events/exists`: accepts `{"record_pks":["event:..."]}` and returns existing/missing keys for preflight upload negotiation.
@@ -106,7 +107,7 @@ path that removes stale entries from Codex/Cursor hook config.
 - `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, process/tool/skill counts, token totals, and code metrics.
 - `GET /sessions/<session_id>?limit=200&surface=codex`: chronological session events, compact timeline, snapshots, process summary, and session code metrics.
 - `GET /stats`: aggregate counts and token totals.
-- `GET /metrics/code?surface=codex&session_id=...`: post-processed generated/adopted code line metrics.
+- `GET /metrics/code?surface=codex&session_id=...`: post-processed generated/adopted/uncommitted code line metrics.
 
 ## Data Layout
 
@@ -139,9 +140,9 @@ curl 'http://127.0.0.1:8765/sessions/<SESSION_ID>?limit=200'
 curl 'http://127.0.0.1:8765/metrics/code'
 ```
 
-`/sessions` returns per-session summaries: event count, hook counts, operation category counts, tool/skill counts, failure counts, token totals, environment/session refs, and generated/adopted code metrics.
+`/sessions` returns per-session summaries: event count, hook counts, operation category counts, tool/skill counts, failure counts, token totals, environment/session refs, and generated/adopted/uncommitted code metrics.
 
-`/sessions/<SESSION_ID>` returns chronological events for one session plus a compact `timeline` view, the referenced environment/session snapshots, process summary, and the same code metrics scoped to that session.
+`/sessions/<SESSION_ID>` returns chronological events for one session plus a compact `timeline` view, transcript-derived agent messages when the local `transcript_path` is readable, the referenced environment/session snapshots, process summary, and the same code metrics scoped to that session.
 
 New client events include structured blocks in addition to the raw hook payload:
 
@@ -153,9 +154,18 @@ New client events include structured blocks in addition to the raw hook payload:
 Current metric definitions:
 
 - `generated_code`: weak definition. Counts code additions/deletions parsed from successful post-write hook payloads such as patch/file-edit tool inputs. Assistant response code blocks are not counted unless they appear in a write/patch payload.
-- `adopted_code`: medium definition. Counts code additions/deletions still present in the latest session-end workspace `git diff HEAD` snapshot. This is not proof that code was committed or merged.
+- `adopted_code`: medium definition. Counts generated code that is either still present in the latest session-end workspace `git diff HEAD` snapshot, or was included in a successful `git commit` summary in the same session.
+- `uncommitted_code`: medium definition. Counts code still visible in the latest session-end workspace diff, or generated after the latest successful `git commit` when no workspace diff is available.
+- `latest_git_commit_code`: latest observed successful `git commit` summary only. This is useful when a session contains multiple commits and `adopted_code` is larger because it is cumulative.
 
 To support `adopted_code`, the client records a compact `workspace_diff` numstat snapshot on `Stop` / `sessionEnd` hooks when the hook payload has a git worktree `cwd`. The snapshot stores file paths and line counts, not full diff bodies.
+When a successful `git commit` is observed but no workspace diff is available,
+the server uses the commit output summary (`N files changed, X insertions(+),
+Y deletions(-)`) when available. If the commit output has no summary, the
+server conservatively treats generated code from the same session as adopted
+because hook output does not include per-file commit numstat.
+For sessions whose hook `cwd` is outside the git worktree, `uncommitted_code`
+falls back to successful post-write payloads after the latest observed commit.
 
 ## Validation
 

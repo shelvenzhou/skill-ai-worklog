@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from .metrics import compute_code_metrics
@@ -159,6 +162,174 @@ def timeline_event(record: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if value is not None}
 
 
+def session_transcript_paths(snapshot_records: list[dict[str, Any]], session_id: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for record in snapshot_records:
+        session = nested_dict(record, "session")
+        if not session:
+            continue
+        snapshot_session_id = session.get("session_id")
+        if snapshot_session_id not in (None, "", session_id):
+            continue
+        transcript_path = session.get("transcript_path")
+        if not isinstance(transcript_path, str) or not transcript_path:
+            continue
+        path = Path(transcript_path).expanduser()
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            paths.append(path)
+    return paths
+
+
+def transcript_agent_messages(
+    session_id: str,
+    snapshot_records: list[dict[str, Any]],
+    *,
+    max_messages: int = 500,
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for path in session_transcript_paths(snapshot_records, session_id):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("type") != "event_msg":
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "agent_message":
+                continue
+            message = payload.get("message")
+            if not isinstance(message, str) or not message:
+                continue
+            timestamp = str(item.get("timestamp") or "")
+            phase = str(payload.get("phase") or "message")
+            digest = hashlib.sha256(f"{path}\0{timestamp}\0{phase}\0{message}".encode("utf-8")).hexdigest()[:20]
+            messages.append(
+                {
+                    "record_type": "transcript_agent_message",
+                    "event_id": f"transcript:{digest}",
+                    "session_id": session_id,
+                    "received_at": timestamp,
+                    "hook_event_name": "AgentMessage",
+                    "operation": {
+                        "category": "response",
+                        "phase": phase,
+                        "name": "AgentMessage",
+                        "success": True,
+                    },
+                    "content": {"response": message},
+                    "transcript_path": str(path),
+                    "transcript_only": True,
+                }
+            )
+    messages.sort(key=record_time)
+    return messages[-max_messages:]
+
+
+def transcript_apply_patch_events(
+    session_id: str,
+    event_records: list[dict[str, Any]],
+    snapshot_records: list[dict[str, Any]],
+    *,
+    max_events: int = 500,
+) -> list[dict[str, Any]]:
+    existing_tool_use_ids = {
+        str(raw.get("tool_use_id"))
+        for record in event_records
+        for raw in [nested_dict(record, "raw_hook_input")]
+        if raw.get("tool_use_id")
+    }
+    events: list[dict[str, Any]] = []
+    for path in session_transcript_paths(snapshot_records, session_id):
+        calls: dict[str, dict[str, Any]] = {}
+        results: dict[str, dict[str, Any]] = {}
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            timestamp = str(item.get("timestamp") or "")
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if item.get("type") == "response_item" and payload.get("type") == "custom_tool_call":
+                call_id = payload.get("call_id")
+                if (
+                    isinstance(call_id, str)
+                    and payload.get("name") == "apply_patch"
+                    and isinstance(payload.get("input"), str)
+                ):
+                    calls[call_id] = {
+                        "timestamp": timestamp,
+                        "input": payload.get("input"),
+                        "status": payload.get("status"),
+                    }
+            elif item.get("type") == "event_msg" and payload.get("type") == "patch_apply_end":
+                call_id = payload.get("call_id")
+                if isinstance(call_id, str):
+                    results[call_id] = {
+                        "timestamp": timestamp,
+                        "success": payload.get("success"),
+                        "changes": payload.get("changes"),
+                    }
+
+        for call_id, call in calls.items():
+            if call_id in existing_tool_use_ids:
+                continue
+            result = results.get(call_id, {})
+            if result.get("success") is False:
+                continue
+            changes = result.get("changes")
+            files_written = sorted(changes) if isinstance(changes, dict) else []
+            timestamp = str(result.get("timestamp") or call.get("timestamp") or "")
+            digest = hashlib.sha256(f"{path}\0{call_id}\0{call.get('input')}".encode("utf-8")).hexdigest()[:20]
+            events.append(
+                {
+                    "record_type": "event",
+                    "event_id": f"transcript-tool:{digest}",
+                    "session_id": session_id,
+                    "received_at": timestamp,
+                    "hook_event_name": "PostToolUse",
+                    "operation": {
+                        "category": "tool",
+                        "phase": "after",
+                        "name": "PostToolUse",
+                        "success": True,
+                    },
+                    "tool": {
+                        "name": "apply_patch",
+                        "type": "tool",
+                        "files_written": files_written,
+                    },
+                    "content": {"tool_input": call.get("input")},
+                    "raw_hook_input": {
+                        "tool_name": "apply_patch",
+                        "tool_use_id": call_id,
+                        "source": "transcript",
+                    },
+                    "transcript_path": str(path),
+                    "transcript_only": True,
+                }
+            )
+    events.sort(key=record_time)
+    return events[-max_events:]
+
+
 def summarize_session_records(
     session_id: str,
     records: list[dict[str, Any]],
@@ -175,6 +346,7 @@ def summarize_session_records(
         {
             "generated": {"additions": 0, "deletions": 0, "files": 0, "events": 0},
             "adopted": {"additions": 0, "deletions": 0, "files": 0, "events": 0},
+            "uncommitted": {"additions": 0, "deletions": 0, "files": 0, "events": 0},
         },
     )
 
@@ -191,6 +363,12 @@ def summarize_session_records(
         "code_metrics": {
             "generated_code": code_metrics.get("generated", {}),
             "adopted_code": code_metrics.get("adopted", {}),
+            "uncommitted_code": code_metrics.get("uncommitted", {}),
+            "adoption_source": code_metrics.get("adoption_source"),
+            "git_commit_events": code_metrics.get("git_commit_events", 0),
+            "latest_git_commit_code": code_metrics.get("latest_git_commit_code"),
+            "latest_git_commit_event_id": code_metrics.get("latest_git_commit_event_id"),
+            "latest_git_commit_received_at": code_metrics.get("latest_git_commit_received_at"),
             "latest_workspace_diff_event_id": code_metrics.get("latest_workspace_diff_event_id"),
             "latest_workspace_diff_received_at": code_metrics.get("latest_workspace_diff_received_at"),
         },
@@ -199,13 +377,23 @@ def summarize_session_records(
     }
 
 
-def build_sessions_index(records: list[dict[str, Any]], limit: int = 50) -> dict[str, Any]:
+def build_sessions_index(
+    records: list[dict[str, Any]],
+    limit: int = 50,
+    snapshot_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     event_records = [record for record in records if record.get("record_type") == "event"]
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in event_records:
         grouped[session_key(record)].append(record)
 
-    code_metrics = compute_code_metrics(event_records)
+    transcript_tool_events: list[dict[str, Any]] = []
+    if snapshot_records:
+        for grouped_session_id, session_records in grouped.items():
+            transcript_tool_events.extend(transcript_apply_patch_events(grouped_session_id, session_records, snapshot_records))
+
+    metric_records = [*event_records, *transcript_tool_events]
+    code_metrics = compute_code_metrics(metric_records)
     summaries = [
         summarize_session_records(session_id, session_records, code_metrics.get("by_session", {}))
         for session_id, session_records in grouped.items()
@@ -219,6 +407,7 @@ def build_sessions_index(records: list[dict[str, Any]], limit: int = 50) -> dict
         "code_metrics": {
             "generated_code": code_metrics["generated_code"],
             "adopted_code": code_metrics["adopted_code"],
+            "uncommitted_code": code_metrics["uncommitted_code"],
         },
         "process": process_summary(event_records),
     }
@@ -242,19 +431,26 @@ def build_session_detail(
 ) -> dict[str, Any]:
     matching_events = [record for record in event_records if session_key(record) == session_id]
     ordered = sorted(matching_events, key=record_time)
-    code_metrics = compute_code_metrics(ordered)
+    transcript_tool_events = transcript_apply_patch_events(session_id, ordered, snapshot_records)
+    metric_records = sorted([*ordered, *transcript_tool_events], key=record_time)
+    code_metrics = compute_code_metrics(metric_records)
     summary = summarize_session_records(session_id, ordered, code_metrics.get("by_session", {}))
     bounded_limit = max(1, min(int(limit), 1000))
+    assistant_messages = transcript_agent_messages(session_id, snapshot_records)
+    combined_timeline_records = sorted([*ordered[:bounded_limit], *transcript_tool_events, *assistant_messages], key=record_time)
     return {
         "session": summary,
         "events": ordered[:bounded_limit],
-        "timeline": [timeline_event(record) for record in ordered[:bounded_limit]],
+        "assistant_messages": assistant_messages,
+        "transcript_tool_events": transcript_tool_events,
+        "timeline": [timeline_event(record) for record in combined_timeline_records],
         "event_count": len(ordered),
         "returned_events": min(len(ordered), bounded_limit),
         "snapshots": classify_snapshots(snapshot_records),
         "code_metrics": {
             "generated_code": code_metrics["generated_code"],
             "adopted_code": code_metrics["adopted_code"],
+            "uncommitted_code": code_metrics["uncommitted_code"],
         },
         "process": process_summary(ordered),
     }

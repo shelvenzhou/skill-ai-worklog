@@ -195,6 +195,13 @@ def merge_files(target: dict[str, dict[str, int]], source: dict[str, dict[str, i
         merge_file_counts(target, path, counts.get("additions", 0), counts.get("deletions", 0))
 
 
+def copy_file_counts(source: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+    return {
+        path: {"additions": int(counts.get("additions") or 0), "deletions": int(counts.get("deletions") or 0)}
+        for path, counts in source.items()
+    }
+
+
 def generated_files_from_event(record: dict[str, Any]) -> dict[str, dict[str, int]]:
     hook = str(record.get("hook_event_name") or "").lower()
     if hook not in POST_WRITE_HOOKS:
@@ -255,8 +262,53 @@ def workspace_code_files(record: dict[str, Any]) -> dict[str, dict[str, int]]:
     return files
 
 
+def successful_git_commit(record: dict[str, Any]) -> bool:
+    operation = record.get("operation")
+    if isinstance(operation, dict) and operation.get("success") is False:
+        return False
+
+    tool = record.get("tool")
+    command = tool.get("command") if isinstance(tool, dict) else None
+    if not isinstance(command, str):
+        content = record.get("content")
+        tool_input = content.get("tool_input") if isinstance(content, dict) else None
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return False
+
+    return bool(re.search(r"(^|&&|\|\||;)\s*git\s+commit(\s|$)", command))
+
+
+def git_commit_summary(record: dict[str, Any]) -> dict[str, int] | None:
+    candidates: list[Any] = []
+    content = record.get("content")
+    if isinstance(content, dict):
+        candidates.append(content.get("tool_response"))
+    raw = record.get("raw_hook_input")
+    if isinstance(raw, dict):
+        candidates.append(raw.get("tool_response"))
+
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        for line in candidate.splitlines():
+            if " changed" not in line:
+                continue
+            files_match = re.search(r"(?P<files>\d+)\s+files?\s+changed", line)
+            if not files_match:
+                continue
+            insertions_match = re.search(r"(?P<insertions>\d+)\s+insertions?\(\+\)", line)
+            deletions_match = re.search(r"(?P<deletions>\d+)\s+deletions?\(-\)", line)
+            return {
+                "additions": int(insertions_match.group("insertions")) if insertions_match else 0,
+                "deletions": int(deletions_match.group("deletions")) if deletions_match else 0,
+                "files": int(files_match.group("files")),
+            }
+    return None
+
+
 def event_sort_key(record: dict[str, Any]) -> str:
-    return str(record.get("received_at") or record.get("client_received_at") or "")
+    return str(record.get("received_at") or record.get("client_received_at") or record.get("_server_ingested_at") or "")
 
 
 def compute_code_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -264,7 +316,7 @@ def compute_code_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     generated_events = 0
     latest_adopted_event: dict[str, dict[str, Any]] = {}
 
-    for record in records:
+    for record in sorted(records, key=event_sort_key):
         if record.get("record_type") != "event":
             continue
         session_id = str(record.get("session_id") or "unknown")
@@ -275,7 +327,15 @@ def compute_code_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "adopted": empty_counts(),
                 "generated_files": {},
                 "adopted_files": {},
+                "uncommitted_files": {},
+                "committed_generated_files": {},
+                "committed_summary": empty_counts(),
+                "latest_git_commit_code": empty_counts(),
+                "pending_generated_files": {},
                 "generated_events": 0,
+                "uncommitted_events": 0,
+                "pending_generated_events": 0,
+                "git_commit_events": 0,
             },
         )
 
@@ -283,40 +343,103 @@ def compute_code_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         if generated_files:
             generated_events += 1
             session["generated_events"] += 1
+            session["uncommitted_events"] += 1
+            session["pending_generated_events"] += 1
             merge_files(session["generated_files"], generated_files)
+            merge_files(session["pending_generated_files"], generated_files)
 
-        adopted_files = workspace_code_files(record)
-        if adopted_files:
+        has_workspace_diff = isinstance(record.get("workspace_diff"), dict)
+        workspace_files = workspace_code_files(record)
+        if has_workspace_diff:
             current = latest_adopted_event.get(session_id)
             if current is None or event_sort_key(record) >= event_sort_key(current):
                 latest_adopted_event[session_id] = record
-                session["adopted_files"] = adopted_files
+                session["uncommitted_files"] = workspace_files
                 session["latest_workspace_diff_event_id"] = record.get("event_id")
                 session["latest_workspace_diff_received_at"] = record.get("received_at")
+                if workspace_files:
+                    session["adopted_files"] = workspace_files
+                    session["adoption_source"] = "workspace_diff"
+
+        if successful_git_commit(record):
+            session["git_commit_events"] += 1
+            summary = git_commit_summary(record)
+            if summary:
+                session["committed_summary"]["additions"] += summary["additions"]
+                session["committed_summary"]["deletions"] += summary["deletions"]
+                session["committed_summary"]["files"] += summary["files"]
+                session["committed_summary"]["events"] += 1
+            session["committed_generated_files"] = copy_file_counts(session["generated_files"])
+            session["pending_generated_files"] = {}
+            session["pending_generated_events"] = 0
+            current = session.get("latest_git_commit_event")
+            if current is None or event_sort_key(record) >= event_sort_key(current):
+                session["latest_git_commit_event"] = record
+                if summary:
+                    session["latest_git_commit_code"] = {**summary, "events": 1}
+                else:
+                    session["latest_git_commit_code"] = {**code_totals_from_files(session["generated_files"]), "events": 1}
 
     total_generated_files: dict[str, dict[str, int]] = {}
-    total_adopted_files_by_session: list[dict[str, dict[str, int]]] = []
+    total_uncommitted_files_by_session: list[dict[str, dict[str, int]]] = []
+    total_adopted_counts_by_session: list[dict[str, int]] = []
     for session in by_session.values():
+        if not session["adopted_files"] and session["git_commit_events"] and session["committed_summary"]["events"]:
+            commit_event = session.get("latest_git_commit_event") or {}
+            session["latest_git_commit_event_id"] = commit_event.get("event_id")
+            session["latest_git_commit_received_at"] = commit_event.get("received_at")
+            session["adoption_source"] = "git_commit_summary"
+        elif not session["adopted_files"] and session["git_commit_events"] and session["committed_generated_files"]:
+            session["adopted_files"] = session["committed_generated_files"]
+            commit_event = session.get("latest_git_commit_event") or {}
+            session["latest_git_commit_event_id"] = commit_event.get("event_id")
+            session["latest_git_commit_received_at"] = commit_event.get("received_at")
+            session["adoption_source"] = "git_commit_generated_code"
+
+        if not session["uncommitted_files"] and session["pending_generated_files"]:
+            session["uncommitted_files"] = session["pending_generated_files"]
+
         session["generated"] = {**code_totals_from_files(session["generated_files"]), "events": session["generated_events"]}
-        session["adopted"] = {**code_totals_from_files(session["adopted_files"]), "events": 0}
+        if session["committed_summary"]["events"] and session.get("adoption_source") == "git_commit_summary":
+            session["adopted"] = dict(session["committed_summary"])
+        else:
+            session["adopted"] = {**code_totals_from_files(session["adopted_files"]), "events": int(session["git_commit_events"])}
+        uncommitted_events = 1 if session.get("latest_workspace_diff_event_id") and session["uncommitted_files"] else session["pending_generated_events"]
+        session["uncommitted"] = {
+            **code_totals_from_files(session["uncommitted_files"]),
+            "events": int(uncommitted_events),
+        }
         merge_files(total_generated_files, session["generated_files"])
-        if session["adopted_files"]:
-            total_adopted_files_by_session.append(session["adopted_files"])
+        if session["committed_summary"]["events"] and session.get("adoption_source") == "git_commit_summary":
+            total_adopted_counts_by_session.append(session["committed_summary"])
+        elif session["adopted_files"]:
+            total_adopted_counts_by_session.append(code_totals_from_files(session["adopted_files"]))
+        if session["uncommitted_files"]:
+            total_uncommitted_files_by_session.append(session["uncommitted_files"])
 
     adopted_additions = 0
     adopted_deletions = 0
     adopted_files = 0
-    for files in total_adopted_files_by_session:
-        totals = code_totals_from_files(files)
+    for totals in total_adopted_counts_by_session:
         adopted_additions += totals["additions"]
         adopted_deletions += totals["deletions"]
         adopted_files += totals["files"]
+
+    uncommitted_additions = 0
+    uncommitted_deletions = 0
+    uncommitted_files = 0
+    for files in total_uncommitted_files_by_session:
+        totals = code_totals_from_files(files)
+        uncommitted_additions += totals["additions"]
+        uncommitted_deletions += totals["deletions"]
+        uncommitted_files += totals["files"]
 
     generated_totals = code_totals_from_files(total_generated_files)
     return {
         "definitions": {
             "generated_code": "weak: code additions/deletions parsed from successful post-write hook payloads",
-            "adopted_code": "medium: latest session-end workspace git diff code additions/deletions still present against HEAD",
+            "adopted_code": "medium: generated code that is either still present in the latest session-end workspace diff or was followed by a successful git commit in the same session",
+            "uncommitted_code": "medium: code still visible in the latest session-end workspace diff, or generated after the latest successful git commit when no workspace diff is available",
         },
         "generated_code": {
             **generated_totals,
@@ -326,19 +449,39 @@ def compute_code_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             "additions": adopted_additions,
             "deletions": adopted_deletions,
             "files": adopted_files,
-            "sessions": len(total_adopted_files_by_session),
+            "sessions": len(total_adopted_counts_by_session),
+        },
+        "uncommitted_code": {
+            "additions": uncommitted_additions,
+            "deletions": uncommitted_deletions,
+            "files": uncommitted_files,
+            "sessions": len(total_uncommitted_files_by_session),
         },
         "by_session": {
             session_id: {
                 key: value
                 for key, value in session.items()
-                if key not in {"generated_files", "adopted_files", "generated_events"}
+                if key
+                not in {
+                    "generated_files",
+                    "adopted_files",
+                    "uncommitted_files",
+                    "committed_generated_files",
+                    "committed_summary",
+                    "pending_generated_files",
+                    "generated_events",
+                    "uncommitted_events",
+                    "pending_generated_events",
+                    "latest_git_commit_event",
+                }
             }
             for session_id, session in sorted(by_session.items())
         },
         "notes": [
             "Only code-like file paths are counted.",
             "Assistant response code blocks are not counted as generated code unless they appear in a write/patch payload.",
-            "Adopted code is a session-end workspace state, not proof that code was committed or merged.",
+            "Git commit adoption uses git commit summary output when available; without that summary it falls back to generated code in the same session.",
+            "Adopted code is session cumulative. latest_git_commit_code shows only the latest observed commit summary.",
+            "Uncommitted fallback counts generated post-write payloads after the latest successful git commit when no workspace diff is present.",
         ],
     }
