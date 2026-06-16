@@ -87,7 +87,7 @@ def read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         backup = path.with_suffix(path.suffix + ".bak")
         shutil.copy2(path, backup)

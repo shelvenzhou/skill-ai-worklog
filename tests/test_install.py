@@ -134,6 +134,14 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(list(doc["hooks"].keys()), ["PostToolUse"])
             self.assertEqual(doc["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "python3 /tmp/other.py")
 
+    def test_read_json_accepts_utf8_bom(self) -> None:
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.json"
+            path.write_text('{"hooks": {}}\n', encoding="utf-8-sig")
+
+            self.assertEqual(installer.read_json(path), {"hooks": {}})
+
     def test_disable_config_marks_collection_off_without_deleting_paths(self) -> None:
         installer = load_installer()
         with tempfile.TemporaryDirectory() as tmp:
