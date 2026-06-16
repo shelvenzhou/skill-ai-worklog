@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import journal
+import replay
 
 
 class JournalTests(unittest.TestCase):
@@ -218,6 +219,42 @@ class JournalTests(unittest.TestCase):
             self.assertTrue(paths["app.py"]["is_code"])
             self.assertEqual(paths["new.ts"]["additions"], 1)
             self.assertTrue(paths["new.ts"]["untracked"])
+
+
+class ReplayTests(unittest.TestCase):
+    def test_load_replay_records_orders_snapshots_first_and_deduplicates_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = journal.default_config()
+            cfg["snapshot_log_dir"] = str(root / "snapshots")
+            cfg["local_log_dir"] = str(root / "events")
+            cfg["failed_log_dir"] = str(root / "failed")
+
+            (root / "snapshots").mkdir()
+            (root / "events").mkdir()
+            (root / "failed").mkdir()
+            (root / "snapshots" / "2026-06-16.jsonl").write_text(
+                json.dumps({"record_type": "snapshot", "snapshot_id": "s1"}) + "\n",
+                encoding="utf-8",
+            )
+            (root / "events" / "2026-06-16.jsonl").write_text(
+                json.dumps({"record_type": "event", "event_id": "e1"}) + "\n",
+                encoding="utf-8",
+            )
+            (root / "failed" / "2026-06-16.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"record_type": "event", "event_id": "e1", "upload_error": "offline"}),
+                        json.dumps({"record_type": "event", "event_id": "e2", "upload_failed_at": "now"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            records = replay.load_replay_records(cfg)
+            self.assertEqual([journal.record_pk(record) for record in records], ["snapshot:s1", "event:e1", "event:e2"])
+            self.assertNotIn("upload_failed_at", records[2])
 
 
 if __name__ == "__main__":

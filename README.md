@@ -121,6 +121,14 @@ The client writes:
 - `~/.ai-worklog/snapshots/YYYY-MM-DD.jsonl`: deduplicated environment/session snapshots.
 - `~/.ai-worklog/failed/YYYY-MM-DD.jsonl`: upload failures for later replay.
 
+Replay local backlog after downtime or first-time rollout:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/replay.py --server-url http://127.0.0.1:8765/events --batch-size 100
+```
+
+`replay.py` reads local snapshots, events, and failed uploads in that order, strips failed-upload metadata, deduplicates by record key, calls `/events/exists` in batches, and uploads missing records to `/events` as JSON arrays.
+
 ## Server Analysis
 
 The collector includes server-side analysis endpoints for session browsing and code metrics:
