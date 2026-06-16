@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install AI worklog hooks for Codex and Cursor."""
+"""Install or uninstall AI worklog hooks for Codex and Cursor."""
 
 from __future__ import annotations
 
@@ -115,10 +115,14 @@ def python_command(skill_dir: Path, surface: str, config_path: Path) -> str:
     journal = skill_dir / "scripts" / "journal.py"
     python = sys.executable or "python3"
     return (
-        f"{shell_quote(python)} {shell_quote(str(journal))} "
-        f"--surface {shell_quote(surface)} "
-        f"--config {shell_quote(str(config_path))} "
-        f"--source-id {SKILL_NAME}"
+        "/bin/sh -c "
+        + shell_quote('test -f "$1" || exit 0; exec "$2" "$1" --surface "$3" --config "$4" --source-id "$5"')
+        + f" {shell_quote(SKILL_NAME + '-hook')}"
+        + f" {shell_quote(str(journal))}"
+        + f" {shell_quote(python)}"
+        + f" {shell_quote(surface)}"
+        + f" {shell_quote(str(config_path))}"
+        + f" {shell_quote(SKILL_NAME)}"
     )
 
 
@@ -190,6 +194,39 @@ def merge_hooks(path: Path, events: list[str], command: str, versioned: bool, dr
     print(f"Installed {added} hook handlers in {path}")
 
 
+def remove_hooks(path: Path, versioned: bool, dry_run: bool) -> int:
+    doc = read_json(path)
+    if versioned and doc:
+        doc.setdefault("version", 1)
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        print(f"No hook handlers found in {path}")
+        return 0
+
+    removed = 0
+    for existing_event in list(hooks.keys()):
+        event_entries = hooks.get(existing_event)
+        if not isinstance(event_entries, list):
+            continue
+        filtered = []
+        for entry in event_entries:
+            if is_worklog_entry(entry):
+                removed += 1
+            else:
+                filtered.append(entry)
+        if filtered:
+            hooks[existing_event] = filtered
+        else:
+            hooks.pop(existing_event, None)
+
+    if removed:
+        write_json(path, doc, dry_run)
+    else:
+        print(f"No AI worklog hook handlers found in {path}")
+    print(f"Removed {removed} hook handlers from {path}")
+    return removed
+
+
 def update_config(args: argparse.Namespace, dry_run: bool) -> None:
     cfg = read_json(CONFIG_PATH)
     cfg.update(
@@ -221,6 +258,19 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
     )
     write_json(CONFIG_PATH, cfg, dry_run)
     print(f"Configured worklog at {CONFIG_PATH}")
+
+
+def disable_config(dry_run: bool) -> None:
+    cfg = read_json(CONFIG_PATH)
+    cfg.update(
+        {
+            "enabled": False,
+            "collection_level": "off",
+            "uninstalled": True,
+        }
+    )
+    write_json(CONFIG_PATH, cfg, dry_run)
+    print(f"Disabled worklog config at {CONFIG_PATH}")
 
 
 def codex_home() -> Path:
@@ -293,20 +343,28 @@ def install_cursor(args: argparse.Namespace) -> None:
     print(f"Cursor skill path: {skill_dir}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Install AI worklog hooks.")
-    parser.add_argument("--surface", choices=["codex", "cursor", "both"], default="both")
-    parser.add_argument("--level", choices=["full", "diagnostic", "basic", "off"], default="full")
-    parser.add_argument("--hook-set", choices=["minimal", "full"], default="minimal")
-    parser.add_argument("--server-url", default=os.environ.get("AI_WORKLOG_SERVER_URL") or os.environ.get("AI_USAGE_COLLECTOR_SERVER_URL"))
-    parser.add_argument("--api-key-env", default="AI_WORKLOG_API_KEY")
-    parser.add_argument("--local-log-dir", default=str(CONFIG_HOME / "events"))
-    parser.add_argument("--snapshot-log-dir", default=str(CONFIG_HOME / "snapshots"))
-    parser.add_argument("--failed-log-dir", default=str(CONFIG_HOME / "failed"))
-    parser.add_argument("--timeout", type=float, default=2.0)
-    parser.add_argument("--max-transcript-bytes", type=int, default=5 * 1024 * 1024)
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+def uninstall_codex(args: argparse.Namespace) -> None:
+    home = codex_home()
+    remove_hooks(home / "hooks.json", versioned=False, dry_run=args.dry_run)
+    print(f"Codex hook removal complete in {home}")
+
+
+def uninstall_cursor(args: argparse.Namespace) -> None:
+    home = cursor_home()
+    remove_hooks(home / "hooks.json", versioned=True, dry_run=args.dry_run)
+    print(f"Cursor hook removal complete in {home}")
+
+
+def run(args: argparse.Namespace) -> int:
+    if args.uninstall:
+        disable_config(args.dry_run)
+        if args.surface in {"codex", "both"}:
+            uninstall_codex(args)
+        if args.surface in {"cursor", "both"}:
+            uninstall_cursor(args)
+        print("AI worklog uninstallation complete.")
+        print("Existing logs under ~/.ai-worklog are left in place.")
+        return 0
 
     update_config(args, args.dry_run)
     if args.surface in {"codex", "both"}:
@@ -320,6 +378,34 @@ def main() -> int:
     if args.server_url:
         print(f"Upload endpoint: {args.server_url}")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Install or uninstall AI worklog hooks.")
+    parser.add_argument("--surface", choices=["codex", "cursor", "both"], default="both")
+    parser.add_argument("--level", choices=["full", "diagnostic", "basic", "off"], default="full")
+    parser.add_argument("--hook-set", choices=["minimal", "full"], default="minimal")
+    parser.add_argument("--uninstall", action="store_true", help="Remove AI worklog hook handlers and disable collection without deleting logs.")
+    parser.add_argument("--server-url", default=os.environ.get("AI_WORKLOG_SERVER_URL") or os.environ.get("AI_USAGE_COLLECTOR_SERVER_URL"))
+    parser.add_argument("--api-key-env", default="AI_WORKLOG_API_KEY")
+    parser.add_argument("--local-log-dir", default=str(CONFIG_HOME / "events"))
+    parser.add_argument("--snapshot-log-dir", default=str(CONFIG_HOME / "snapshots"))
+    parser.add_argument("--failed-log-dir", default=str(CONFIG_HOME / "failed"))
+    parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--max-transcript-bytes", type=int, default=5 * 1024 * 1024)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    try:
+        return run(args)
+    except PermissionError as exc:
+        print(
+            "Permission denied while updating AI worklog configuration. "
+            "Allow this installer to write Codex/Cursor hook config files, then rerun the same command. "
+            f"Original error: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
 
 if __name__ == "__main__":

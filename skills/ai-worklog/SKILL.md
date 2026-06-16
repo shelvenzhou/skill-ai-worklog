@@ -21,7 +21,13 @@ If this skill is not installed yet and the user points to the GitHub repository,
 - ref: `master`
 - path: `skills/ai-worklog`
 
-Do not assume the repository uses `main`, and do not install the repo root as the skill. If `~/.codex/skills/ai-worklog` already exists, skip the copy step and run the installed `install.py` directly.
+Preferred direct source URL:
+
+```text
+https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog
+```
+
+Do not pass the bare repository URL to `skill-installer --url`; it will fail with `Missing --path for GitHub URL`. Do not assume the repository uses `main`, and do not install the repo root as the skill. If `~/.codex/skills/ai-worklog` already exists, skip the copy step and run the installed `install.py` directly.
 
 Run scripts with `python3`; do not rely on executable file permissions surviving the GitHub install path.
 
@@ -51,6 +57,14 @@ After installation, show the user how to reduce or disable collection:
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level diagnostic
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 ```
+
+To remove the hook handlers without deleting existing logs:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --uninstall
+```
+
+Run this before deleting the installed skill files. Newer installed hooks also exit quietly if `journal.py` has already been deleted, but `--uninstall` is the path that removes stale entries from Codex/Cursor hook config.
 
 For local development from the repository checkout, the equivalent path is `python3 skills/ai-worklog/scripts/install.py ...`.
 
@@ -132,6 +146,14 @@ Disable collection without removing hooks:
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 ```
+
+Uninstall hook handlers while leaving historical logs under `~/.ai-worklog`:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --uninstall
+```
+
+If a generic skill uninstall deletes `~/.codex/skills/ai-worklog` first, the guarded hook command will no-op instead of failing, but the hook config should still be cleaned with `--uninstall` when the installer is available.
 
 Smoke-test upload without a real backend:
 

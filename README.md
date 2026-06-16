@@ -7,6 +7,22 @@ AI Worklog Observability is a small internal observability package for Codex and
 
 The first rollout target is internal usage. The defaults intentionally collect rich records when the client is installed with `--level full`.
 
+## Agent Install
+
+If a teammate asks an agent to install this from GitHub, use the skill directory URL, not the repository root URL:
+
+```text
+请用 skill-installer 安装这个 skill：
+https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog
+
+安装 skill 文件后继续启用 hooks：
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
+```
+
+The repository root URL, `https://github.com/shelvenzhou/skill-ai-worklog`, is not directly installable by `skill-installer` because the repo also contains the collector server and tests. The default branch is `master`, and the installable skill lives at `skills/ai-worklog`.
+
+If the skill is already installed at `~/.codex/skills/ai-worklog`, skip the GitHub copy step and run the installed `install.py` directly with `python3`.
+
 ## Quick Start
 
 Run the collector server:
@@ -50,8 +66,6 @@ python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level ful
 如果没有提供 collector 地址，先按本地记录模式安装，不要用 <INTRANET_SERVER_URL> 占位符。
 ```
 
-If the skill is already installed at `~/.codex/skills/ai-worklog`, skip the GitHub copy step and run the installed `install.py` directly with `python3`.
-
 Keep the operational install details in `skills/ai-worklog/SKILL.md` so the agent sees them after installing or activating the skill. Before publishing, decide whether upload auth is required and document the internal collector endpoint if there is a stable one.
 
 The agent-facing company-internal installer command with upload enabled is:
@@ -72,6 +86,16 @@ The collection is intended for company-internal control and usage observability.
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level diagnostic
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 ```
+
+To remove the installed hook handlers while keeping existing logs:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --uninstall
+```
+
+Run this before deleting the installed skill files. Newer installed hooks also
+exit quietly if `journal.py` has already been deleted, but `--uninstall` is the
+path that removes stale entries from Codex/Cursor hook config.
 
 ## Endpoints
 
