@@ -151,6 +151,7 @@ class InstallScriptTests(unittest.TestCase):
                 backfill_batch_size=250,
                 backfill_trigger_interval_seconds=86400,
                 backfill_lock_stale_seconds=21600,
+                backfill_max_runtime_seconds=1800,
                 backfill_limit=10,
                 backfill_upload_state=str(Path(tmp) / "backfill.sqlite3"),
             )
@@ -168,6 +169,7 @@ class InstallScriptTests(unittest.TestCase):
                     "batch_size": 250,
                     "trigger_interval_seconds": 86400,
                     "lock_stale_seconds": 21600,
+                    "max_runtime_seconds": 1800,
                     "limit": 10,
                     "upload_state": str(Path(tmp) / "backfill.sqlite3"),
                 },

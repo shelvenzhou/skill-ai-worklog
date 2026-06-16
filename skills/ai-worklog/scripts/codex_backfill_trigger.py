@@ -17,6 +17,7 @@ import journal
 
 DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
+DEFAULT_MAX_RUNTIME_SECONDS = 30 * 60
 
 
 def backfill_config(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -66,6 +67,14 @@ def lock_stale_seconds(cfg: dict[str, Any]) -> int:
         return max(60, int(value))
     except (TypeError, ValueError):
         return DEFAULT_LOCK_STALE_SECONDS
+
+
+def max_runtime_seconds(cfg: dict[str, Any]) -> int:
+    value = backfill_config(cfg).get("max_runtime_seconds")
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RUNTIME_SECONDS
 
 
 def should_run(cfg: dict[str, Any], now: float | None = None) -> bool:
@@ -134,9 +143,19 @@ def run_backfill(config_path: Path, cfg: dict[str, Any]) -> int:
     with log.open("a", encoding="utf-8") as fh:
         fh.write(f"\n[{journal.utc_now()}] starting codex history backfill\n")
         fh.flush()
-        completed = subprocess.run(command, stdout=fh, stderr=fh, check=False)
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=fh,
+                stderr=fh,
+                check=False,
+                timeout=max_runtime_seconds(cfg),
+            )
+        except subprocess.TimeoutExpired:
+            fh.write(f"[{journal.utc_now()}] backfill timed out\n")
+            return 124
         fh.write(f"[{journal.utc_now()}] backfill exited {completed.returncode}\n")
-    return int(completed.returncode)
+        return int(completed.returncode)
 
 
 def main() -> int:

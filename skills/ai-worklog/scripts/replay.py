@@ -144,7 +144,7 @@ def existing_record_pks(record_pks: list[str], cfg: dict[str, Any]) -> set[str]:
         headers=journal.upload_headers(cfg),
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=float(cfg.get("request_timeout_seconds") or 2.0)) as response:
+    with urllib.request.urlopen(request, timeout=journal.request_timeout_seconds(cfg)) as response:
         if not (200 <= response.status < 300):
             raise RuntimeError(f"preflight failed with HTTP {response.status}")
         result = json.loads(response.read().decode("utf-8"))
@@ -159,7 +159,7 @@ def upload_records(records: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[s
 
     payload = json.dumps(records, ensure_ascii=False, default=str).encode("utf-8")
     request = urllib.request.Request(server_url, data=payload, headers=journal.upload_headers(cfg), method="POST")
-    with urllib.request.urlopen(request, timeout=float(cfg.get("request_timeout_seconds") or 2.0)) as response:
+    with urllib.request.urlopen(request, timeout=journal.request_timeout_seconds(cfg)) as response:
         if not (200 <= response.status < 300):
             raise RuntimeError(f"upload failed with HTTP {response.status}")
         result = json.loads(response.read().decode("utf-8"))

@@ -16,6 +16,7 @@ from typing import Any
 SKILL_NAME = "ai-worklog"
 CONFIG_HOME = Path.home() / ".ai-worklog"
 CONFIG_PATH = CONFIG_HOME / "config.json"
+DEFAULT_BACKFILL_MAX_RUNTIME_SECONDS = 30 * 60
 CODEX_MINIMAL_EVENTS = [
     "SessionStart",
     "UserPromptSubmit",
@@ -266,6 +267,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
         "batch_size": args.backfill_batch_size,
         "trigger_interval_seconds": args.backfill_trigger_interval_seconds,
         "lock_stale_seconds": args.backfill_lock_stale_seconds,
+        "max_runtime_seconds": args.backfill_max_runtime_seconds,
     }
     if args.backfill_limit is not None:
         cfg["codex_history_backfill"]["limit"] = args.backfill_limit
@@ -383,7 +385,7 @@ def run_codex_backfill(args: argparse.Namespace, skill_dir: Path) -> None:
         print(" ".join(shell_quote(part) for part in command))
         return
     print("Running Codex historical session backfill...")
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, timeout=args.backfill_max_runtime_seconds)
 
 
 def uninstall_codex(args: argparse.Namespace) -> None:
@@ -455,6 +457,12 @@ def main() -> int:
     parser.add_argument("--no-auto-codex-backfill", action="store_true", help="Disable automatic background Codex history backfill from SessionStart hooks.")
     parser.add_argument("--backfill-trigger-interval-seconds", type=int, default=24 * 60 * 60, help="Minimum seconds between automatic Codex history backfill trigger attempts.")
     parser.add_argument("--backfill-lock-stale-seconds", type=int, default=6 * 60 * 60, help="Seconds before an automatic backfill lock is considered stale.")
+    parser.add_argument(
+        "--backfill-max-runtime-seconds",
+        type=int,
+        default=DEFAULT_BACKFILL_MAX_RUNTIME_SECONDS,
+        help="Maximum seconds a Codex historical backfill subprocess may run.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -468,6 +476,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    except subprocess.TimeoutExpired as exc:
+        print(f"AI worklog installation failed: Codex history backfill timed out after {exc.timeout} seconds", file=sys.stderr)
+        return 1
     except (ValueError, subprocess.CalledProcessError) as exc:
         print(f"AI worklog installation failed: {exc}", file=sys.stderr)
         return 1

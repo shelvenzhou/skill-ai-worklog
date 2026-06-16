@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import journal
@@ -298,6 +301,13 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].full_url, "http://127.0.0.1:8765/events/exists")
 
+    def test_invalid_request_timeout_config_falls_back_to_default(self) -> None:
+        cfg = journal.default_config()
+        cfg["request_timeout_seconds"] = "not-a-number"
+        self.assertEqual(journal.request_timeout_seconds(cfg), journal.DEFAULT_REQUEST_TIMEOUT_SECONDS)
+        cfg["request_timeout_seconds"] = -1
+        self.assertEqual(journal.request_timeout_seconds(cfg), journal.DEFAULT_REQUEST_TIMEOUT_SECONDS)
+
     def test_stop_event_records_workspace_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -506,6 +516,38 @@ class CodexBackfillTests(unittest.TestCase):
             path.write_text("{}\n{}\n", encoding="utf-8")
             self.assertFalse(ledger.transcript_complete("collector", path))
 
+    def test_backfill_dry_run_skips_bad_transcript(self) -> None:
+        original_argv = sys.argv
+        stdout = StringIO()
+        stderr = StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / "rollout-2026-06-16T00-00-00-good.jsonl"
+            bad = root / "rollout-2026-06-16T00-00-00-bad.jsonl"
+            good.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "s1", "cwd": tmp}}) + "\n",
+                encoding="utf-8",
+            )
+            bad.write_text("{not json}\n", encoding="utf-8")
+            sys.argv = [
+                "codex_backfill.py",
+                "--sessions-root",
+                str(root),
+                "--dry-run",
+            ]
+            try:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    rc = codex_backfill.main()
+            finally:
+                sys.argv = original_argv
+
+        self.assertEqual(rc, 0)
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(summary["transcripts"], 2)
+        self.assertEqual(summary["transcripts_failed"], 1)
+        self.assertEqual(summary["records"], 3)
+        self.assertIn("skipping transcript", stderr.getvalue())
+
     def test_backfill_trigger_requires_server_url_and_respects_interval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = journal.default_config()
@@ -521,6 +563,28 @@ class CodexBackfillTests(unittest.TestCase):
 
             codex_backfill_trigger.mark_started(Path(cfg["codex_history_backfill"]["trigger_state_path"]))
             self.assertFalse(codex_backfill_trigger.should_run(cfg, now=time.time()))
+
+    def test_backfill_trigger_times_out_stuck_subprocess(self) -> None:
+        original_run = codex_backfill_trigger.subprocess.run
+
+        def fake_run(*args: object, **kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(cmd=kwargs.get("args") or "codex_backfill.py", timeout=1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = journal.default_config()
+            cfg["server_url"] = "http://collector.example/events"
+            cfg["codex_history_backfill"] = {
+                "log_path": str(Path(tmp) / "backfill.log"),
+                "max_runtime_seconds": 1,
+            }
+            try:
+                codex_backfill_trigger.subprocess.run = fake_run
+                rc = codex_backfill_trigger.run_backfill(Path(tmp) / "config.json", cfg)
+            finally:
+                codex_backfill_trigger.subprocess.run = original_run
+
+            self.assertEqual(rc, 124)
+            self.assertIn("backfill timed out", (Path(tmp) / "backfill.log").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

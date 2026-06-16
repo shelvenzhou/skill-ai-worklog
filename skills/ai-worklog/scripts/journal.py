@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import platform
 import socket
@@ -24,6 +25,7 @@ VERSION = "0.3.0"
 DEFAULT_HOME = Path.home() / ".ai-worklog"
 DEFAULT_CONFIG_PATH = DEFAULT_HOME / "config.json"
 DEFAULT_MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 2.0
 SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -134,7 +136,7 @@ def default_config() -> dict[str, Any]:
         "failed_log_dir": str(DEFAULT_HOME / "failed"),
         "server_url": None,
         "api_key_env": "AI_WORKLOG_API_KEY",
-        "request_timeout_seconds": 2.0,
+        "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
         "upload_preflight": True,
         "max_transcript_bytes": DEFAULT_MAX_TRANSCRIPT_BYTES,
         "capture": {
@@ -165,6 +167,16 @@ def merged_config(config_path: Path) -> dict[str, Any]:
     if level:
         cfg["collection_level"] = level
     return cfg
+
+
+def request_timeout_seconds(cfg: dict[str, Any]) -> float:
+    try:
+        value = float(cfg.get("request_timeout_seconds") or DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return value
 
 
 def read_stdin_json() -> dict[str, Any]:
@@ -941,7 +953,7 @@ def server_has_record(record: dict[str, Any], cfg: dict[str, Any]) -> bool:
     try:
         with urllib.request.urlopen(
             request,
-            timeout=float(cfg.get("request_timeout_seconds") or 2.0),
+            timeout=request_timeout_seconds(cfg),
         ) as response:
             if not (200 <= response.status < 300):
                 return False
@@ -963,7 +975,7 @@ def upload_event(event: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, str 
     try:
         with urllib.request.urlopen(
             request,
-            timeout=float(cfg.get("request_timeout_seconds") or 2.0),
+            timeout=request_timeout_seconds(cfg),
         ) as response:
             if 200 <= response.status < 300:
                 return True, None

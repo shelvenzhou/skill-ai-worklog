@@ -46,7 +46,7 @@ launchctl setenv AI_WORKLOG_API_KEY <TOKEN>
 
 If the current install or backfill command will upload immediately, also set `AI_WORKLOG_API_KEY` in that shell environment.
 
-With upload configured, Codex `SessionStart` hooks start a background historical backfill through `codex_backfill_trigger.py`. The trigger reads `~/.codex/sessions/**/rollout-*.jsonl`, uses a lock plus a default 24-hour throttle, logs to `~/.ai-worklog/codex_backfill.log`, and stores progress in `~/.ai-worklog/codex_backfill_state.sqlite3`.
+With upload configured, Codex `SessionStart` hooks start a background historical backfill through `codex_backfill_trigger.py`. The trigger reads `~/.codex/sessions/**/rollout-*.jsonl`, uses a lock plus a default 24-hour throttle, caps each subprocess run at 30 minutes, logs to `~/.ai-worklog/codex_backfill.log`, and stores progress in `~/.ai-worklog/codex_backfill_state.sqlite3`.
 
 Run historical backfill immediately during installation only if the user asks for it:
 

@@ -538,6 +538,7 @@ def main() -> int:
     summary: dict[str, Any] = {
         "transcripts": len(paths),
         "transcripts_skipped_local": 0,
+        "transcripts_failed": 0,
         "records": 0,
         "by_type": {},
         "dry_run": args.dry_run,
@@ -546,13 +547,18 @@ def main() -> int:
 
     if args.dry_run:
         for path in paths:
-            records = []
-            for record in events_from_transcript(path, cfg):
-                pk = journal.record_pk(record)
-                if pk in seen_dry_run:
-                    continue
-                seen_dry_run.add(pk)
-                records.append(record)
+            try:
+                records = []
+                for record in events_from_transcript(path, cfg):
+                    pk = journal.record_pk(record)
+                    if pk in seen_dry_run:
+                        continue
+                    seen_dry_run.add(pk)
+                    records.append(record)
+            except Exception as exc:
+                summary["transcripts_failed"] += 1
+                print(f"skipping transcript {path}: {exc}", file=sys.stderr)
+                continue
             summary["records"] += len(records)
             update_type_counts(summary["by_type"], records)
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -577,8 +583,15 @@ def main() -> int:
             continue
         try:
             records = events_from_transcript(path, cfg)
-            summary["records"] += len(records)
-            update_type_counts(summary["by_type"], records)
+        except Exception as exc:
+            ledger.mark_transcript(collector_url, path, "error", error=str(exc))
+            summary["transcripts_failed"] += 1
+            print(f"skipping transcript {path}: {exc}", file=sys.stderr)
+            continue
+
+        summary["records"] += len(records)
+        update_type_counts(summary["by_type"], records)
+        try:
             result = upload_records(
                 records,
                 cfg,
@@ -587,11 +600,15 @@ def main() -> int:
                 collector_url=collector_url,
                 force=args.force,
             )
-            merge_counts(upload_summary, result)
-            ledger.mark_transcript(collector_url, path, "complete", result)
-        except Exception as exc:
-            ledger.mark_transcript(collector_url, path, "error", error=str(exc))
-            raise
+        except (OSError, RuntimeError, urllib.error.URLError) as exc:
+            ledger.mark_transcript(collector_url, path, "upload_error", error=str(exc))
+            summary["upload"] = upload_summary
+            summary["upload_error"] = str(exc)
+            print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+            print(f"codex backfill upload failed: {exc}", file=sys.stderr)
+            return 1
+        merge_counts(upload_summary, result)
+        ledger.mark_transcript(collector_url, path, "complete", result)
 
     summary["upload"] = upload_summary
 
