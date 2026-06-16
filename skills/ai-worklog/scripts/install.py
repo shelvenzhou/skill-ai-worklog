@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -156,7 +157,10 @@ def is_worklog_entry(entry: Any) -> bool:
         if isinstance(hook, dict):
             command = str(hook.get("command") or "")
             if ("ai-worklog" in command or "ai-usage-collector" in command) and (
-                "journal.py" in command or "collector.py" in command
+                "journal.py" in command
+                or "collector.py" in command
+                or "codex_backfill.py" in command
+                or "codex_backfill_trigger.py" in command
             ):
                 return True
     return False
@@ -257,6 +261,16 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
             "raw_reasoning": False,
         }
     )
+    cfg["codex_history_backfill"] = {
+        "enabled": not args.no_auto_codex_backfill,
+        "batch_size": args.backfill_batch_size,
+        "trigger_interval_seconds": args.backfill_trigger_interval_seconds,
+        "lock_stale_seconds": args.backfill_lock_stale_seconds,
+    }
+    if args.backfill_limit is not None:
+        cfg["codex_history_backfill"]["limit"] = args.backfill_limit
+    if args.backfill_upload_state:
+        cfg["codex_history_backfill"]["upload_state"] = str(Path(args.backfill_upload_state).expanduser())
     write_json(CONFIG_PATH, cfg, dry_run)
     print(f"Configured worklog at {CONFIG_PATH}")
 
@@ -325,7 +339,7 @@ def ensure_codex_hooks_feature(home: Path, dry_run: bool) -> None:
     print(f"Enabled Codex hooks feature in {config_path}")
 
 
-def install_codex(args: argparse.Namespace) -> None:
+def install_codex(args: argparse.Namespace) -> Path:
     home = codex_home()
     skill_dir = copy_skill(home / "skills" / SKILL_NAME, args.dry_run)
     command = python_command(skill_dir, "codex", CONFIG_PATH)
@@ -333,6 +347,7 @@ def install_codex(args: argparse.Namespace) -> None:
     merge_hooks(home / "hooks.json", events, command, versioned=False, dry_run=args.dry_run)
     ensure_codex_hooks_feature(home, args.dry_run)
     print(f"Codex skill path: {skill_dir}")
+    return skill_dir
 
 
 def install_cursor(args: argparse.Namespace) -> None:
@@ -342,6 +357,33 @@ def install_cursor(args: argparse.Namespace) -> None:
     events = CURSOR_FULL_EVENTS if args.hook_set == "full" else CURSOR_MINIMAL_EVENTS
     merge_hooks(home / "hooks.json", events, command, versioned=True, dry_run=args.dry_run)
     print(f"Cursor skill path: {skill_dir}")
+
+
+def run_codex_backfill(args: argparse.Namespace, skill_dir: Path) -> None:
+    if not args.server_url and not args.dry_run:
+        raise ValueError("--backfill-codex-history requires --server-url")
+    script = skill_dir / "scripts" / "codex_backfill.py"
+    command = [
+        sys.executable or "python3",
+        str(script),
+        "--config",
+        str(CONFIG_PATH),
+        "--batch-size",
+        str(args.backfill_batch_size),
+    ]
+    if args.server_url:
+        command.extend(["--server-url", str(args.server_url)])
+    if args.backfill_limit is not None:
+        command.extend(["--limit", str(args.backfill_limit)])
+    if args.backfill_upload_state:
+        command.extend(["--upload-state", str(Path(args.backfill_upload_state).expanduser())])
+    if args.dry_run:
+        command.append("--dry-run")
+        print("[dry-run] would run Codex historical session backfill:")
+        print(" ".join(shell_quote(part) for part in command))
+        return
+    print("Running Codex historical session backfill...")
+    subprocess.run(command, check=True)
 
 
 def uninstall_codex(args: argparse.Namespace) -> None:
@@ -367,11 +409,22 @@ def run(args: argparse.Namespace) -> int:
         print("Existing logs under ~/.ai-worklog are left in place.")
         return 0
 
+    if args.backfill_codex_history:
+        if args.surface not in {"codex", "both"}:
+            raise ValueError("--backfill-codex-history requires --surface codex or --surface both")
+        if not args.server_url and not args.dry_run:
+            raise ValueError("--backfill-codex-history requires --server-url")
+
     update_config(args, args.dry_run)
+    codex_skill_dir: Path | None = None
     if args.surface in {"codex", "both"}:
-        install_codex(args)
+        codex_skill_dir = install_codex(args)
     if args.surface in {"cursor", "both"}:
         install_cursor(args)
+    if args.backfill_codex_history:
+        if codex_skill_dir is None:
+            raise ValueError("--backfill-codex-history requires --surface codex or --surface both")
+        run_codex_backfill(args, codex_skill_dir)
 
     print("AI worklog installation complete.")
     print(f"Local event logs: {Path(args.local_log_dir).expanduser()}")
@@ -395,6 +448,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=2.0)
     parser.add_argument("--no-upload-preflight", action="store_true", help="Upload records directly without checking /events/exists first.")
     parser.add_argument("--max-transcript-bytes", type=int, default=5 * 1024 * 1024)
+    parser.add_argument("--backfill-codex-history", action="store_true", help="After installing Codex hooks, upload historical ~/.codex/sessions transcripts.")
+    parser.add_argument("--backfill-batch-size", type=int, default=250, help="Records per historical backfill preflight/upload request.")
+    parser.add_argument("--backfill-limit", type=int, help="Maximum historical Codex transcript files to process, newest first.")
+    parser.add_argument("--backfill-upload-state", help="SQLite progress ledger for historical Codex backfill.")
+    parser.add_argument("--no-auto-codex-backfill", action="store_true", help="Disable automatic background Codex history backfill from SessionStart hooks.")
+    parser.add_argument("--backfill-trigger-interval-seconds", type=int, default=24 * 60 * 60, help="Minimum seconds between automatic Codex history backfill trigger attempts.")
+    parser.add_argument("--backfill-lock-stale-seconds", type=int, default=6 * 60 * 60, help="Seconds before an automatic backfill lock is considered stale.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -408,6 +468,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    except (ValueError, subprocess.CalledProcessError) as exc:
+        print(f"AI worklog installation failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

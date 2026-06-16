@@ -7,66 +7,54 @@ description: Install and operate an internal AI-assisted worklog for Codex and C
 
 ## Objective
 
-Install a local worklog that turns Codex and Cursor hook events into structured AI-assisted work records. The default internal mode is `full`, which records prompt text, agent responses exposed to hooks, tool inputs/results, compact environment/session snapshots, and best-effort token usage from Codex transcripts.
+Install a local worklog that turns Codex and Cursor hook events into structured AI-assisted work records. Installing the skill files alone is not enough: `install.py` must write Codex/Cursor hook config.
 
-When asked to install or enable this skill, run the installer. Installing the skill files alone is not enough because hooks must be written into the host app config.
+The default internal mode is `full`, which records prompt text, agent responses exposed to hooks, tool inputs/results, compact environment/session snapshots, and best-effort token usage from Codex transcripts. Use `diagnostic`, `basic`, or `off` when the user asks to reduce collection.
 
 ## Install
 
-When a user asks to install or enable `ai-worklog`, install this skill first, then run the installer from the installed skill path. Installing the skill files only copies instructions and scripts; it does not enable worklog collection until `install.py` writes Codex/Cursor hooks.
-
-If this skill is not installed yet and the user points to the GitHub repository, use these source details with `skill-installer`:
+If this skill is not installed yet and the user points to GitHub, install the skill directory, not the repository root:
 
 - repo: `shelvenzhou/skill-ai-worklog`
 - ref: `master`
 - path: `skills/ai-worklog`
+- URL: `https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog`
 
-Preferred direct source URL:
+Do not pass the bare repository URL to `skill-installer --url`; it requires `--path` for this repository. Do not assume the branch is `main`.
 
-```text
-https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog
-```
+Run scripts with `python3`; executable bits may not survive GitHub install. If `~/.codex/skills/ai-worklog` already exists, skip copying and run its installer directly.
 
-Do not pass the bare repository URL to `skill-installer --url`; it will fail with `Missing --path for GitHub URL`. Do not assume the repository uses `main`, and do not install the repo root as the skill. If `~/.codex/skills/ai-worklog` already exists, skip the copy step and run the installed `install.py` directly.
-
-Run scripts with `python3`; do not rely on executable file permissions surviving the GitHub install path.
-
-Default local install for Codex and Cursor:
+Default local-only install:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
 ```
 
-Company-internal rollout with upload enabled:
+Company-internal install with upload:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
 ```
 
-Only include `--server-url` when the user has provided a real collector endpoint or the internal endpoint is known. If no collector is provided, install local-only by omitting `--server-url`; events still write to `~/.ai-worklog/events`.
+Only include `--server-url` when the user has provided a real collector endpoint or the internal endpoint is known. Without it, events still write locally under `~/.ai-worklog/events`.
 
-If upload requires auth on macOS, persist the token for future Codex/Cursor hook processes before running the installer or before restarting the apps:
+If upload auth is required on macOS, persist the token for future Codex/Cursor hook processes before restarting the apps:
 
 ```bash
 launchctl setenv AI_WORKLOG_API_KEY <TOKEN>
 ```
 
-After installation, show the user how to reduce or disable collection:
+If the current install or backfill command will upload immediately, also set `AI_WORKLOG_API_KEY` in that shell environment.
+
+With upload configured, Codex `SessionStart` hooks start a background historical backfill through `codex_backfill_trigger.py`. The trigger reads `~/.codex/sessions/**/rollout-*.jsonl`, uses a lock plus a default 24-hour throttle, logs to `~/.ai-worklog/codex_backfill.log`, and stores progress in `~/.ai-worklog/codex_backfill_state.sqlite3`.
+
+Run historical backfill immediately during installation only if the user asks for it:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level diagnostic
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY --backfill-codex-history
 ```
 
-To remove the hook handlers without deleting existing logs:
-
-```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --uninstall
-```
-
-Run this before deleting the installed skill files. Newer installed hooks also exit quietly if `journal.py` has already been deleted, but `--uninstall` is the path that removes stale entries from Codex/Cursor hook config.
-
-For local development from the repository checkout, the equivalent path is `python3 skills/ai-worklog/scripts/install.py ...`.
+For local development from the repository checkout, use `python3 skills/ai-worklog/scripts/install.py ...`.
 
 ## What It Installs
 
@@ -74,9 +62,9 @@ For local development from the repository checkout, the equivalent path is `pyth
 - Writes `~/.ai-worklog/config.json`.
 - Appends idempotent hook handlers into `$CODEX_HOME/hooks.json` and/or `~/.cursor/hooks.json`.
 - Enables Codex hooks in `$CODEX_HOME/config.toml` by setting `[features].hooks = true`.
-- Records per-interaction JSONL events under `~/.ai-worklog/events/YYYY-MM-DD.jsonl`.
-- Records non-repeated environment/session snapshots under `~/.ai-worklog/snapshots/YYYY-MM-DD.jsonl`.
-- Spools failed uploads under `~/.ai-worklog/failed/YYYY-MM-DD.jsonl`.
+- Writes event, snapshot, failed-upload, replay, and Codex-backfill state under `~/.ai-worklog`.
+
+Hook commands are guarded: if `journal.py` has already been deleted, installed hooks no-op instead of failing. Still prefer `--uninstall` before deleting the skill so stale hook entries are removed.
 
 ## Collection Levels
 
@@ -87,33 +75,26 @@ For local development from the repository checkout, the equivalent path is `pyth
 
 ## Hook Sets
 
-- `minimal`: default. Codex uses `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `SubagentStop`, `Stop`. Cursor uses `sessionStart`, `beforeSubmitPrompt`, `postToolUse`, `postToolUseFailure`, `afterAgentResponse`, `subagentStop`, `stop`. This keeps authorization short while preserving prompts, responses, tool inputs/results, failed tool outputs when exposed, subagent completion, and Codex token usage through transcript reads.
+- `minimal`: default. Codex uses `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `SubagentStop`, `Stop`. Cursor uses `sessionStart`, `beforeSubmitPrompt`, `postToolUse`, `postToolUseFailure`, `afterAgentResponse`, `subagentStop`, `stop`.
 - `full`: adds permission, pre-tool, compaction, file edit/read, shell/MCP, tab, session-end, and thought hooks. Use only for internal diagnostic runs where extra authorization prompts are acceptable.
 
 ## Data Model
 
-Event records are written one per hook event:
+Event records include normalized metadata for surface, hook event, session/turn, timeline, operation, tool, optional skill, content, usage, snapshot refs, and compact workspace diff when available. At `full`, `raw_hook_input` is also retained after common envelope keys are removed.
 
-- `record_type = "event"`, `event_id`, `received_at`, `collector_version`
-- `surface`, `hook_event_name`, `session_id`, `turn_id`, `agent_id`, `agent_type`
-- `timeline`: `trace_id`, `span_id`, optional `parent_span_id`, per-session `sequence_no`, start/end timestamps, and duration when exposed
-- `operation`: normalized category, phase, success state, and error type when available
-- `tool`: normalized tool name/type, command, exit code, touched files, and duration when exposed by the hook payload
-- `skill`: optional skill name/path/version/phase when the host product or skill emits those fields
-- `content`: prompt, response, tool input/result, thought/summary when exposed by the product and enabled
-- `usage`: best-effort `token_count` info from transcript or hook payload
-- `environment_ref` and `session_ref`: stable hashes that point to snapshot records
-- `raw_hook_input`: present only at `full`, with common envelope keys removed
-- `workspace_diff`: present on `Stop` / `sessionEnd` when the workspace is a git repo; stores compact numstat-style line counts, not full diff bodies
+Snapshot records are deduplicated by stable hash and contain model, cwd, transcript path, user email, OS, hostname, git root/branch/commit/dirty state, and other session/environment metadata that would otherwise repeat on every event.
 
-Snapshot records are written once per environment hash and once per session id. They contain model, cwd, transcript path, user email, OS, hostname, git root/branch/commit/dirty state, and other global metadata that would otherwise repeat on every event.
+Collector endpoints:
 
-The collector server also exposes `GET /metrics/code` for post-processed code metrics:
+- `POST /events`: accepts one JSON object, a JSON array, or NDJSON.
+- `POST /events/exists`: preflight deduplication by record primary key.
+- `GET /records`: recent indexed records.
+- `GET /stats`: aggregate counts and token totals.
+- `GET /sessions` and `GET /sessions/<session_id>`: session browsing, timelines, process summaries, token totals, tool/skill/failure counts, and code metrics.
+- `GET /metrics/code`: generated/adopted/uncommitted code metrics.
+- `GET /ui`: browser dashboard.
 
-- `generated_code`: weak definition, parsed from successful post-write patch/file-edit payloads.
-- `adopted_code`: medium definition, latest session-end `git diff HEAD` code line counts still present in the worktree.
-
-The collector server exposes `GET /sessions` and `GET /sessions/<session_id>` for session browsing. These endpoints consume the structured `timeline`, `operation`, `tool`, and `skill` blocks to return process summaries, compact timelines, tool counts, skill counts, failure counts, and code metrics.
+Code metrics are approximate: `generated_code` comes from successful write/patch payloads and transcript-derived apply_patch events; `adopted_code` comes from latest workspace diff or successful `git commit` summaries; `uncommitted_code` tracks generated code still visible after the latest observed commit. Workspace diff snapshots store numstat-style counts, not full diff bodies.
 
 ## Operations
 
@@ -121,18 +102,15 @@ Inspect local data:
 
 ```bash
 tail -n 20 ~/.ai-worklog/events/$(date +%F).jsonl
-```
-
-Inspect snapshots:
-
-```bash
 tail -n 20 ~/.ai-worklog/snapshots/$(date +%F).jsonl
 ```
 
-Change collection level:
+Change level, disable, or uninstall:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level diagnostic
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --uninstall
 ```
 
 Enable full hook coverage:
@@ -141,31 +119,29 @@ Enable full hook coverage:
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --hook-set full
 ```
 
-Disable collection without removing hooks:
-
-```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
-```
-
-Uninstall hook handlers while leaving historical logs under `~/.ai-worklog`:
-
-```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --uninstall
-```
-
-If a generic skill uninstall deletes `~/.codex/skills/ai-worklog` first, the guarded hook command will no-op instead of failing, but the hook config should still be cleaned with `--uninstall` when the installer is available.
-
-Smoke-test upload without a real backend:
+Smoke-test upload without the full collector:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/dev_server.py --port 8765
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --server-url http://127.0.0.1:8765/events
 ```
 
-Upload preflight is enabled by default. Before sending a full event or snapshot payload, the hook asks the collector `POST /events/exists` with the record primary key only. If the collector says the record already exists, the hook skips the full upload. Disable this compatibility path only when needed:
+Replay local backlog:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --no-upload-preflight
+python3 ~/.codex/skills/ai-worklog/scripts/replay.py --server-url <COLLECTOR_URL>/events --batch-size 100
+```
+
+Backfill existing Codex sessions:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/codex_backfill.py --sessions-root ~/.codex/sessions --server-url <COLLECTOR_URL>/events --batch-size 250
+```
+
+Use `--dry-run` first for a count-only pass. Use `--force` when the local upload ledger may be stale and the collector should deduplicate again. Disable automatic Codex backfill only when required:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --no-auto-codex-backfill
 ```
 
 Run the bundled collector server from the repository root:
@@ -174,18 +150,24 @@ Run the bundled collector server from the repository root:
 python3 -m server.ai_worklog_server --host 127.0.0.1 --port 8765 --data-dir ./data
 ```
 
-## One-Line Prompt For Teammates
+Upload preflight is enabled by default through `POST /events/exists`; disable it only for collector compatibility:
 
-After publishing this skill in the internal skill source, teammates should only need a short request like:
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --no-upload-preflight
+```
+
+## Teammate Prompt
+
+After publishing this skill internally, teammates should only need:
 
 ```text
 请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog，然后运行 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
 ```
 
-Add `--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY` to that request only when upload to a known collector is required. The full installer command, auth instruction, and `diagnostic`/`off` commands are intentionally kept in this skill's `Install` section so the agent sees them when it activates the skill.
+Add `--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY` only when upload to a known collector is required.
 
 ## Notes
 
 - Codex hook payloads do not directly include token usage. The worklog reads the Codex `transcript_path` tail and extracts the latest `event_msg.type == "token_count"` record when available.
-- Raw reasoning is not a stable product surface. The worklog records reasoning summaries or thought events only when they are explicitly exposed by the host product. Encrypted reasoning content in transcripts is ignored.
-- The hook scripts never block agent execution intentionally; upload failures are written to the failed spool and return success.
+- Raw reasoning is not a stable product surface. The worklog records reasoning summaries or thought events only when explicitly exposed by the host product. Encrypted reasoning content in transcripts is ignored.
+- Hook scripts do not intentionally block agent execution; upload failures are written to the failed spool and return success.

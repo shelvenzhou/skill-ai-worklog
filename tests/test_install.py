@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import argparse
 import subprocess
 import sys
 import tempfile
@@ -128,6 +129,49 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(cfg["collection_level"], "off")
             self.assertTrue(cfg["uninstalled"])
             self.assertEqual(cfg["local_log_dir"], "/tmp/events")
+
+    def test_update_config_writes_auto_backfill_defaults(self) -> None:
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            original_config_path = installer.CONFIG_PATH
+            installer.CONFIG_PATH = config_path
+            args = argparse.Namespace(
+                level="full",
+                local_log_dir=str(Path(tmp) / "events"),
+                snapshot_log_dir=str(Path(tmp) / "snapshots"),
+                failed_log_dir=str(Path(tmp) / "failed"),
+                server_url="http://collector.example/events",
+                api_key_env="AI_WORKLOG_API_KEY",
+                timeout=2.0,
+                no_upload_preflight=False,
+                max_transcript_bytes=1024,
+                hook_set="minimal",
+                no_auto_codex_backfill=False,
+                backfill_batch_size=250,
+                backfill_trigger_interval_seconds=86400,
+                backfill_lock_stale_seconds=21600,
+                backfill_limit=10,
+                backfill_upload_state=str(Path(tmp) / "backfill.sqlite3"),
+            )
+            try:
+                installer.update_config(args, dry_run=False)
+            finally:
+                installer.CONFIG_PATH = original_config_path
+
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(cfg["server_url"], "http://collector.example/events")
+            self.assertEqual(
+                cfg["codex_history_backfill"],
+                {
+                    "enabled": True,
+                    "batch_size": 250,
+                    "trigger_interval_seconds": 86400,
+                    "lock_stale_seconds": 21600,
+                    "limit": 10,
+                    "upload_state": str(Path(tmp) / "backfill.sqlite3"),
+                },
+            )
 
     def test_main_reports_permission_error_without_traceback(self) -> None:
         installer = load_installer()

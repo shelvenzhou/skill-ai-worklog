@@ -982,6 +982,36 @@ def spool_failed(event: dict[str, Any], cfg: dict[str, Any], error: str | None) 
     append_jsonl(failed_log_dir, failed)
 
 
+def auto_codex_backfill_enabled(cfg: dict[str, Any]) -> bool:
+    section = cfg.get("codex_history_backfill")
+    if isinstance(section, dict) and section.get("enabled") is False:
+        return False
+    return bool(cfg.get("server_url"))
+
+
+def maybe_spawn_codex_backfill(payload: dict[str, Any], cfg: dict[str, Any], surface: str, config_path: Path) -> None:
+    hook_event_name = str(
+        value_at(payload, "hook_event_name", "event", "event_name", "hookName")
+        or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
+        or ""
+    )
+    if surface != "codex" or hook_event_name != "SessionStart" or not auto_codex_backfill_enabled(cfg):
+        return
+    script = Path(__file__).resolve().with_name("codex_backfill_trigger.py")
+    if not script.exists():
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable or "python3", str(script), "--config", str(config_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record one Codex/Cursor hook event.")
     parser.add_argument("--surface", default="unknown", help="codex, cursor, or another source label")
@@ -989,7 +1019,8 @@ def main() -> int:
     parser.add_argument("--source-id", default="ai-worklog")
     args = parser.parse_args()
 
-    cfg = merged_config(Path(args.config).expanduser())
+    config_path = Path(args.config).expanduser()
+    cfg = merged_config(config_path)
     payload = read_stdin_json()
     event, snapshots = build_records(payload, cfg, args.surface, args.source_id)
     if event is None:
@@ -1010,6 +1041,7 @@ def main() -> int:
     if not ok:
         spool_failed(event, cfg, error)
 
+    maybe_spawn_codex_backfill(payload, cfg, args.surface, config_path)
     return 0
 
 

@@ -5,14 +5,76 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 import journal
+import codex_backfill
+import codex_backfill_trigger
 import replay
 
 
 class JournalTests(unittest.TestCase):
+    def test_codex_backfill_builds_stable_records_from_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-2026-06-16T00-00-00-s1.jsonl"
+            lines = [
+                {
+                    "timestamp": "2026-06-16T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "s1", "cwd": tmp, "model": "gpt-test"},
+                },
+                {
+                    "timestamp": "2026-06-16T00:00:01Z",
+                    "type": "turn_context",
+                    "payload": {"turn_id": "t1", "cwd": tmp, "model": "gpt-test"},
+                },
+                {
+                    "timestamp": "2026-06-16T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "commit something"},
+                },
+                {
+                    "timestamp": "2026-06-16T00:00:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call_1",
+                        "arguments": json.dumps({"cmd": "git commit -m init", "workdir": tmp}),
+                    },
+                },
+                {
+                    "timestamp": "2026-06-16T00:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "Process exited with code 0\nOutput:\n[main abc123] init\n 1 file changed, 2 insertions(+), 1 deletion(-)\n",
+                    },
+                },
+                {
+                    "timestamp": "2026-06-16T00:00:05Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "t1", "last_agent_message": "done"},
+                },
+            ]
+            path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+            cfg = journal.default_config()
+            cfg["capture"]["token_usage_from_transcript"] = False
+
+            records = codex_backfill.events_from_transcript(path, cfg)
+            events = [record for record in records if record.get("record_type") == "event"]
+            second = codex_backfill.events_from_transcript(path, cfg)
+            second_events = [record for record in second if record.get("record_type") == "event"]
+
+            self.assertEqual([event["event_id"] for event in events], [event["event_id"] for event in second_events])
+            self.assertEqual([event["hook_event_name"] for event in events], ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"])
+            tool_event = next(event for event in events if event["hook_event_name"] == "PostToolUse")
+            self.assertEqual(tool_event["tool"]["command"], "git commit -m init")
+            self.assertEqual(tool_event["tool"]["exit_code"], 0)
+
     def test_build_full_event_with_prompt_and_tool_result(self) -> None:
         payload = {
             "hook_event_name": "PostToolUse",
@@ -382,6 +444,83 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(forced["skipped_local"], 0)
         self.assertEqual(forced["attempted"], 1)
         self.assertEqual(calls, {"preflight": 2, "upload": 2})
+
+
+class CodexBackfillTests(unittest.TestCase):
+    def test_backfill_upload_records_uses_local_ledger_on_rerun(self) -> None:
+        calls = {"preflight": 0, "upload": 0}
+        original_existing = replay.existing_record_pks
+        original_upload = replay.upload_records
+
+        def fake_existing(record_pks: list[str], cfg: dict[str, object]) -> set[str]:
+            calls["preflight"] += 1
+            return set()
+
+        def fake_upload(records: list[dict[str, object]], cfg: dict[str, object]) -> dict[str, int]:
+            calls["upload"] += 1
+            return {"accepted": len(records), "duplicates": 0}
+
+        try:
+            replay.existing_record_pks = fake_existing
+            replay.upload_records = fake_upload
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = journal.default_config()
+                cfg["server_url"] = "http://collector.example/events"
+                ledger = codex_backfill.BackfillLedger(Path(tmp) / "codex_backfill_state.sqlite3")
+                records = [{"record_type": "event", "event_id": "e1"}]
+
+                first = codex_backfill.upload_records(
+                    records,
+                    cfg,
+                    batch_size=100,
+                    ledger=ledger,
+                    collector_url="http://collector.example/events",
+                )
+                second = codex_backfill.upload_records(
+                    records,
+                    cfg,
+                    batch_size=100,
+                    ledger=ledger,
+                    collector_url="http://collector.example/events",
+                )
+        finally:
+            replay.existing_record_pks = original_existing
+            replay.upload_records = original_upload
+
+        self.assertEqual(first["attempted"], 1)
+        self.assertEqual(second["skipped_local"], 1)
+        self.assertEqual(second["attempted"], 0)
+        self.assertEqual(calls, {"preflight": 1, "upload": 1})
+
+    def test_backfill_ledger_tracks_completed_transcript_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "rollout-2026-06-16T00-00-00-s1.jsonl"
+            path.write_text("{}\n", encoding="utf-8")
+            ledger = codex_backfill.BackfillLedger(root / "state.sqlite3")
+
+            self.assertFalse(ledger.transcript_complete("collector", path))
+            ledger.mark_transcript("collector", path, "complete", {"scanned": 1, "accepted": 1})
+            self.assertTrue(ledger.transcript_complete("collector", path))
+
+            path.write_text("{}\n{}\n", encoding="utf-8")
+            self.assertFalse(ledger.transcript_complete("collector", path))
+
+    def test_backfill_trigger_requires_server_url_and_respects_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = journal.default_config()
+            cfg["server_url"] = None
+            cfg["codex_history_backfill"] = {
+                "trigger_state_path": str(Path(tmp) / "trigger.json"),
+                "trigger_interval_seconds": 100,
+            }
+            self.assertFalse(codex_backfill_trigger.should_run(cfg, now=1000))
+
+            cfg["server_url"] = "http://collector.example/events"
+            self.assertTrue(codex_backfill_trigger.should_run(cfg, now=1000))
+
+            codex_backfill_trigger.mark_started(Path(cfg["codex_history_backfill"]["trigger_state_path"]))
+            self.assertFalse(codex_backfill_trigger.should_run(cfg, now=time.time()))
 
 
 if __name__ == "__main__":
