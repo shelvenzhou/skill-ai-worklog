@@ -85,7 +85,7 @@ Client uploads send `AI_WORKLOG_API_KEY` as `Authorization: Bearer ...`; set it 
 `skills/ai-worklog/skill-version.json` is the source of truth for the client skill release:
 
 - `version`: the installed skill/client release, also used by hook records and the `X-AI-Worklog-Version` upload header.
-- `release_tag`: the Git tag expected for that release, currently `ai-worklog-v0.3.0`.
+- `release_tag`: the Git tag expected for that release, currently `ai-worklog-v0.3.1`.
 - `event_schema_version`: the record schema version; this can stay stable across skill releases.
 - `package_version`: the Python project package version, kept aligned with the skill release.
 
