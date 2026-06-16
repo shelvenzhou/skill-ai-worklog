@@ -89,6 +89,39 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(event["content"]["tool_input"]["api_key"], "[REDACTED]")
         self.assertEqual(event["content"]["tool_input"]["query"], "ok")
 
+    def test_stop_event_does_not_duplicate_agent_response_content(self) -> None:
+        event, _ = journal.build_records(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "s1",
+                "response": "final answer",
+                "last_assistant_message": "final answer",
+            },
+            journal.default_config(),
+            "codex",
+            "test",
+        )
+        assert event is not None
+        self.assertEqual(event["operation"]["category"], "session")
+        self.assertEqual(event["operation"]["phase"], "stop")
+        self.assertNotIn("response", event["content"])
+        self.assertEqual(event["raw_hook_input"]["response"], "final answer")
+
+    def test_agent_response_event_keeps_response_content(self) -> None:
+        event, _ = journal.build_records(
+            {
+                "hook_event_name": "afterAgentResponse",
+                "session_id": "s1",
+                "response": "final answer",
+            },
+            journal.default_config(),
+            "cursor",
+            "test",
+        )
+        assert event is not None
+        self.assertEqual(event["operation"]["category"], "response")
+        self.assertEqual(event["content"]["response"], "final answer")
+
     def test_structured_operation_tool_and_skill_metadata(self) -> None:
         event, _ = journal.build_records(
             {

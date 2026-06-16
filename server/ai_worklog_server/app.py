@@ -486,7 +486,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       const content = record.content || {};
       const tool = record.tool || {};
       const raw = record.raw_hook_input || {};
-      return tool.command || content.prompt || content.response || content.tool_input?.command || raw.tool_name || record.hook_event_name || "";
+      const isSessionStop = record.operation?.category === "session" && record.operation?.phase === "stop";
+      const response = isSessionStop ? "" : content.response;
+      return tool.command || content.prompt || response || content.tool_input?.command || raw.tool_name || record.hook_event_name || "";
     }
     function renderTimeline(events) {
       const root = $("timeline");

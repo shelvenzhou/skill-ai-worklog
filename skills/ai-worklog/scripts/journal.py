@@ -662,10 +662,16 @@ def extract_transcript_usage(transcript_path: str | None, max_bytes: int) -> dic
     return latest
 
 
-def extract_content(payload: dict[str, Any], level: str) -> dict[str, Any]:
+def is_session_stop_hook(hook_event_name: str) -> bool:
+    return hook_event_name in {"Stop", "stop", "sessionEnd", "SessionEnd", "session_end"}
+
+
+def extract_content(payload: dict[str, Any], level: str, hook_event_name: str = "") -> dict[str, Any]:
     content: dict[str, Any] = {}
     prompt = value_at(payload, "prompt", "user_prompt", "message")
-    response = value_at(payload, "last_assistant_message", "agent_response", "response")
+    response = None
+    if not is_session_stop_hook(hook_event_name):
+        response = value_at(payload, "last_assistant_message", "agent_response", "response")
     thought = value_at(payload, "thought", "agent_thought")
     tool_input = value_at(payload, "tool_input", "input")
     tool_response = value_at(payload, "tool_response", "output", "result")
@@ -748,7 +754,7 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
         event["skill"] = scrub_sensitive(skill)
 
     if level != "basic":
-        event["content"] = extract_content(payload, level)
+        event["content"] = extract_content(payload, level, hook_event_name)
         if cfg.get("capture", {}).get("token_usage_from_transcript", True):
             event["usage"] = extract_transcript_usage(
                 transcript_path,
@@ -761,7 +767,7 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
     if level == "full" and cfg.get("capture", {}).get("raw_hook_input", True):
         event["raw_hook_input"] = scrub_sensitive(event_specific_payload(payload))
 
-    if hook_event_name in {"Stop", "stop", "sessionEnd", "SessionEnd", "session_end"}:
+    if is_session_stop_hook(hook_event_name):
         workspace_diff = git_workspace_diff(str(cwd) if cwd else None)
         if workspace_diff is not None:
             event["workspace_diff"] = workspace_diff
