@@ -78,8 +78,8 @@ python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 - `GET /healthz`: health check and record count.
 - `POST /events`: accepts one JSON record, a JSON array of records, or NDJSON.
 - `GET /records?limit=50&record_type=event&surface=codex&session_id=...`: recent indexed records.
-- `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, token totals, and code metrics.
-- `GET /sessions/<session_id>?limit=200&surface=codex`: chronological session events, snapshots, and session code metrics.
+- `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, process/tool/skill counts, token totals, and code metrics.
+- `GET /sessions/<session_id>?limit=200&surface=codex`: chronological session events, compact timeline, snapshots, process summary, and session code metrics.
 - `GET /stats`: aggregate counts and token totals.
 - `GET /metrics/code?surface=codex&session_id=...`: post-processed generated/adopted code line metrics.
 
@@ -106,9 +106,16 @@ curl 'http://127.0.0.1:8765/sessions/<SESSION_ID>?limit=200'
 curl 'http://127.0.0.1:8765/metrics/code'
 ```
 
-`/sessions` returns per-session summaries: event count, hook counts, token totals, environment/session refs, and generated/adopted code metrics.
+`/sessions` returns per-session summaries: event count, hook counts, operation category counts, tool/skill counts, failure counts, token totals, environment/session refs, and generated/adopted code metrics.
 
-`/sessions/<SESSION_ID>` returns chronological events for one session plus the referenced environment/session snapshots and the same code metrics scoped to that session.
+`/sessions/<SESSION_ID>` returns chronological events for one session plus a compact `timeline` view, the referenced environment/session snapshots, process summary, and the same code metrics scoped to that session.
+
+New client events include structured blocks in addition to the raw hook payload:
+
+- `timeline`: `trace_id`, `span_id`, optional `parent_span_id`, per-session `sequence_no`, timing, and duration when available.
+- `operation`: normalized category/phase/success metadata derived from the hook event.
+- `tool`: normalized tool name/type, command, exit code, touched files, and duration when exposed by the hook payload.
+- `skill`: optional skill name/path/version/phase when the host product or skill emits those fields.
 
 Current metric definitions:
 

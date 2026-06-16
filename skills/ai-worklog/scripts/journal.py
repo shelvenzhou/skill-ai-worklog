@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DEFAULT_HOME = Path.home() / ".ai-worklog"
 DEFAULT_CONFIG_PATH = DEFAULT_HOME / "config.json"
 DEFAULT_MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024
@@ -109,6 +109,7 @@ CODE_FILENAMES = {
     "requirements.txt",
     "tsconfig.json",
 }
+EVENT_SCHEMA_VERSION = "0.3"
 
 
 def utc_now() -> str:
@@ -240,6 +241,196 @@ def first_nested(payload: dict[str, Any], paths: list[list[str]]) -> Any:
         if cur not in (None, ""):
             return cur
     return None
+
+
+def string_value(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def float_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def sequence_value(payload: dict[str, Any]) -> int | None:
+    return int_value(value_at(payload, "sequence_no", "sequenceNo", "event_index", "eventIndex", "step_index", "stepIndex"))
+
+
+def timing_metadata(payload: dict[str, Any], received_at: str) -> dict[str, Any]:
+    started_at = string_value(
+        value_at(payload, "started_at", "startedAt", "start_time", "startTime")
+        or first_nested(payload, [["timing", "started_at"], ["timing", "start_time"]])
+    )
+    ended_at = string_value(
+        value_at(payload, "ended_at", "endedAt", "end_time", "endTime", "completed_at", "completedAt")
+        or first_nested(payload, [["timing", "ended_at"], ["timing", "end_time"]])
+    )
+    duration_ms = float_value(
+        value_at(payload, "duration_ms", "durationMs", "elapsed_ms", "elapsedMs")
+        or first_nested(payload, [["timing", "duration_ms"], ["timing", "elapsed_ms"]])
+    )
+    timing: dict[str, Any] = {
+        "started_at": started_at or received_at,
+        "ended_at": ended_at,
+        "duration_ms": duration_ms,
+    }
+    return {key: value for key, value in timing.items() if value is not None}
+
+
+def operation_for_hook(hook_event_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    hook = hook_event_name.lower()
+    category = "unknown"
+    phase = "event"
+
+    if hook in {"sessionstart", "workspaceopen"}:
+        category, phase = "session", "start"
+    elif hook in {"stop", "sessionend", "session_end"}:
+        category, phase = "session", "stop"
+    elif hook in {"userpromptsubmit", "beforesubmitprompt"}:
+        category, phase = "prompt", "submit"
+    elif hook == "afteragentresponse":
+        category, phase = "response", "complete"
+    elif hook == "afteragentthought":
+        category, phase = "thought", "complete"
+    elif hook in {"pretooluse", "posttooluse", "posttoolusefailure"}:
+        category = "tool"
+        phase = "failure" if hook.endswith("failure") else ("before" if hook.startswith("pre") else "after")
+    elif hook in {"beforeshellexecution", "aftershellexecution"}:
+        category, phase = "shell", "before" if hook.startswith("before") else "after"
+    elif hook in {"beforemcpexecution", "aftermcpexecution"}:
+        category, phase = "mcp", "before" if hook.startswith("before") else "after"
+    elif hook in {"afterfileedit", "aftertabfileedit"}:
+        category, phase = "file_edit", "after"
+    elif hook in {"beforereadfile", "beforetabfileread"}:
+        category, phase = "file_read", "before"
+    elif hook in {"subagentstart", "subagentstop"}:
+        category, phase = "subagent", "start" if hook.endswith("start") else "stop"
+    elif hook in {"precompact", "postcompact"}:
+        category, phase = "compaction", "before" if hook.startswith("pre") else "after"
+    elif hook == "permissionrequest":
+        category, phase = "approval", "request"
+
+    error = value_at(payload, "error", "error_type", "errorType", "exception")
+    exit_code = int_value(value_at(payload, "exit_code", "exitCode", "status_code", "statusCode"))
+    success: bool | None = None
+    if phase == "failure" or error is not None:
+        success = False
+    elif exit_code is not None:
+        success = exit_code == 0
+    elif phase in {"after", "complete", "stop"}:
+        success = True
+
+    operation: dict[str, Any] = {
+        "category": category,
+        "phase": phase,
+        "name": hook_event_name,
+    }
+    if success is not None:
+        operation["success"] = success
+    error_type = string_value(value_at(payload, "error_type", "errorType") or error)
+    if error_type:
+        operation["error_type"] = error_type
+    return operation
+
+
+def collect_paths(value: Any) -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key in ("path", "file_path", "filepath", "filename", "file"):
+            path = value.get(key)
+            if isinstance(path, str) and path:
+                paths.append(path)
+        for child in value.values():
+            paths.extend(collect_paths(child))
+    elif isinstance(value, list):
+        for child in value:
+            paths.extend(collect_paths(child))
+    return paths
+
+
+def tool_metadata(payload: dict[str, Any], hook_event_name: str, operation: dict[str, Any]) -> dict[str, Any] | None:
+    if operation.get("category") not in {"tool", "shell", "mcp", "file_edit", "file_read"}:
+        return None
+
+    tool_value = value_at(payload, "tool_name", "toolName", "tool")
+    tool_name = string_value(tool_value) or string_value(first_nested(payload, [["tool", "name"], ["metadata", "tool_name"]]))
+    if not tool_name:
+        tool_name = str(operation.get("category") or "unknown")
+
+    tool_input = value_at(payload, "tool_input", "input", "args", "arguments")
+    tool_response = value_at(payload, "tool_response", "output", "result")
+    command = None
+    if isinstance(tool_input, dict):
+        command = string_value(value_at(tool_input, "cmd", "command"))
+    command = command or string_value(value_at(payload, "cmd", "command"))
+    exit_code = int_value(value_at(payload, "exit_code", "exitCode", "status_code", "statusCode"))
+
+    files_written: list[str] = []
+    files_read: list[str] = []
+    if operation.get("category") == "file_read":
+        files_read = collect_paths(tool_input if tool_input is not None else payload)
+    elif operation.get("category") == "file_edit":
+        files_written = collect_paths(tool_input if tool_input is not None else payload)
+    else:
+        for path in collect_paths(tool_input):
+            files_written.append(path)
+
+    metadata: dict[str, Any] = {
+        "name": tool_name,
+        "type": string_value(value_at(payload, "tool_type", "toolType")) or str(operation.get("category") or "tool"),
+        "cwd": string_value(value_at(payload, "cwd", "workspace_path", "workspacePath")),
+        "command": command,
+        "exit_code": exit_code,
+        "success": operation.get("success"),
+        "duration_ms": float_value(value_at(payload, "duration_ms", "durationMs", "elapsed_ms", "elapsedMs")),
+        "files_read": sorted(set(files_read)),
+        "files_written": sorted(set(files_written)),
+    }
+    return {key: value for key, value in metadata.items() if value not in (None, [], {})}
+
+
+def skill_metadata(payload: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any] | None:
+    skill_name = string_value(
+        value_at(payload, "skill_name", "skillName", "skill")
+        or first_nested(payload, [["skill", "name"], ["metadata", "skill_name"]])
+    )
+    if not skill_name:
+        return None
+    metadata: dict[str, Any] = {
+        "name": skill_name,
+        "path": string_value(value_at(payload, "skill_path", "skillPath") or first_nested(payload, [["skill", "path"]])),
+        "version": string_value(value_at(payload, "skill_version", "skillVersion") or first_nested(payload, [["skill", "version"]])),
+        "phase": string_value(value_at(payload, "skill_phase", "skillPhase")) or operation.get("phase"),
+        "success": operation.get("success"),
+    }
+    return {key: value for key, value in metadata.items() if value is not None}
 
 
 def git_metadata(cwd: str | None) -> dict[str, Any] | None:
@@ -506,11 +697,24 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
     env_ref = stable_hash(env)
     session = compact_session_metadata(payload, surface, str(cwd) if cwd else None, str(transcript_path) if transcript_path else None)
     session_ref = stable_hash(session)
+    received_at = utc_now()
+    event_id = str(uuid.uuid4())
+    trace_id = string_value(value_at(payload, "trace_id", "traceId")) or str(session["session_id"] or session_ref)
+    parent_span_id = string_value(value_at(payload, "parent_span_id", "parentSpanId", "parent_event_id", "parentEventId"))
+    operation = operation_for_hook(hook_event_name, payload)
+    timeline = {
+        "trace_id": trace_id,
+        "span_id": event_id,
+        "parent_span_id": parent_span_id,
+        "sequence_no": sequence_value(payload),
+        **timing_metadata(payload, received_at),
+    }
 
     event: dict[str, Any] = {
         "record_type": "event",
-        "event_id": str(uuid.uuid4()),
-        "received_at": utc_now(),
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+        "event_id": event_id,
+        "received_at": received_at,
         "collector_version": VERSION,
         "source_id": source_id,
         "surface": surface,
@@ -522,7 +726,15 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
         "agent_type": session["agent_type"],
         "environment_ref": env_ref,
         "session_ref": session_ref,
+        "timeline": {key: value for key, value in timeline.items() if value is not None},
+        "operation": operation,
     }
+    tool = tool_metadata(payload, hook_event_name, operation)
+    if tool:
+        event["tool"] = scrub_sensitive(tool)
+    skill = skill_metadata(payload, operation)
+    if skill:
+        event["skill"] = scrub_sensitive(skill)
 
     if level != "basic":
         event["content"] = extract_content(payload, level)
@@ -590,6 +802,8 @@ def load_state(path: Path) -> dict[str, Any]:
     state = load_json(path)
     if not isinstance(state.get("snapshot_ids"), list):
         state["snapshot_ids"] = []
+    if not isinstance(state.get("session_sequences"), dict):
+        state["session_sequences"] = {}
     return state
 
 
@@ -614,6 +828,24 @@ def write_new_snapshots(snapshots: list[dict[str, Any]], cfg: dict[str, Any]) ->
     state["snapshot_ids"] = sorted(known)
     save_state(path, state)
     return new_snapshots
+
+
+def assign_event_sequence(event: dict[str, Any], cfg: dict[str, Any]) -> None:
+    timeline = event.setdefault("timeline", {})
+    if not isinstance(timeline, dict) or timeline.get("sequence_no") is not None:
+        return
+    path = state_path(cfg)
+    state = load_state(path)
+    sequences = state.setdefault("session_sequences", {})
+    if not isinstance(sequences, dict):
+        sequences = {}
+        state["session_sequences"] = sequences
+    session_id = str(event.get("session_id") or timeline.get("trace_id") or "unknown")
+    next_value = int_value(sequences.get(session_id)) or 0
+    next_value += 1
+    timeline["sequence_no"] = next_value
+    sequences[session_id] = next_value
+    save_state(path, state)
 
 
 def upload_event(event: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, str | None]:
@@ -663,6 +895,7 @@ def main() -> int:
     event, snapshots = build_records(payload, cfg, args.surface, args.source_id)
     if event is None:
         return 0
+    assign_event_sequence(event, cfg)
 
     for snapshot in write_new_snapshots(snapshots, cfg):
         ok, error = upload_event(snapshot, cfg)

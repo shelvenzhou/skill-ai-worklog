@@ -88,6 +88,46 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(event["content"]["tool_input"]["api_key"], "[REDACTED]")
         self.assertEqual(event["content"]["tool_input"]["query"], "ok")
 
+    def test_structured_operation_tool_and_skill_metadata(self) -> None:
+        event, _ = journal.build_records(
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "apply_patch",
+                "tool_input": {"path": "src/app.py", "content": "print(1)\n"},
+                "duration_ms": 12,
+                "skill_name": "code-fix",
+                "skill_version": "abc123",
+            },
+            journal.default_config(),
+            "codex",
+            "test",
+        )
+        assert event is not None
+        self.assertEqual(event["event_schema_version"], "0.3")
+        self.assertEqual(event["timeline"]["trace_id"], "s1")
+        self.assertEqual(event["timeline"]["span_id"], event["event_id"])
+        self.assertEqual(event["operation"]["category"], "tool")
+        self.assertEqual(event["operation"]["phase"], "after")
+        self.assertTrue(event["operation"]["success"])
+        self.assertEqual(event["tool"]["name"], "apply_patch")
+        self.assertEqual(event["tool"]["files_written"], ["src/app.py"])
+        self.assertEqual(event["skill"]["name"], "code-fix")
+        self.assertEqual(event["skill"]["version"], "abc123")
+
+    def test_assigns_session_sequence_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = journal.default_config()
+            cfg["state_path"] = str(Path(tmp) / "state.json")
+            first, _ = journal.build_records({"session_id": "s1"}, cfg, "codex", "test")
+            second, _ = journal.build_records({"session_id": "s1"}, cfg, "codex", "test")
+            assert first is not None
+            assert second is not None
+            journal.assign_event_sequence(first, cfg)
+            journal.assign_event_sequence(second, cfg)
+            self.assertEqual(first["timeline"]["sequence_no"], 1)
+            self.assertEqual(second["timeline"]["sequence_no"], 2)
+
     def test_snapshot_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = journal.default_config()

@@ -197,6 +197,10 @@ class SessionAnalysisTests(unittest.TestCase):
                 "surface": "codex",
                 "session_id": "s1",
                 "hook_event_name": "PostToolUse",
+                "timeline": {"trace_id": "s1", "span_id": "e1", "sequence_no": 1, "duration_ms": 20},
+                "operation": {"category": "tool", "phase": "after", "name": "PostToolUse", "success": True},
+                "tool": {"name": "apply_patch", "type": "tool", "files_written": ["src/app.py"]},
+                "skill": {"name": "code-fix", "phase": "after"},
                 "environment_ref": "env1",
                 "session_ref": "sess1",
                 "content": {"tool_input": patch},
@@ -209,6 +213,8 @@ class SessionAnalysisTests(unittest.TestCase):
                 "surface": "codex",
                 "session_id": "s1",
                 "hook_event_name": "Stop",
+                "timeline": {"trace_id": "s1", "span_id": "e2", "sequence_no": 2},
+                "operation": {"category": "session", "phase": "stop", "name": "Stop", "success": True},
                 "environment_ref": "env1",
                 "session_ref": "sess1",
                 "workspace_diff": {"files": [{"path": "src/app.py", "additions": 2, "deletions": 0, "is_code": True}]},
@@ -235,12 +241,19 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(s1["code_metrics"]["generated_code"]["additions"], 2)
         self.assertEqual(s1["code_metrics"]["adopted_code"]["additions"], 2)
         self.assertEqual(s1["token_totals"]["total_tokens"], 3)
+        self.assertEqual(s1["process"]["operation_category_counts"]["tool"], 1)
+        self.assertEqual(s1["process"]["tool_counts"]["apply_patch"], 1)
+        self.assertEqual(s1["process"]["skill_counts"]["code-fix"], 1)
+        self.assertEqual(s1["process"]["duration_ms_by_category"]["tool"]["total"], 20)
 
         detail = build_session_detail("s1", events, snapshots)
         self.assertEqual(detail["event_count"], 2)
         self.assertEqual(detail["snapshots"]["environment"][0]["snapshot_id"], "env1")
         self.assertEqual(detail["code_metrics"]["generated_code"]["additions"], 2)
         self.assertEqual([event["event_id"] for event in detail["events"]], ["e1", "e2"])
+        self.assertEqual(detail["timeline"][0]["category"], "tool")
+        self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")
+        self.assertEqual(detail["process"]["skill_counts"]["code-fix"], 1)
 
 
 class AppEndpointTests(unittest.TestCase):
@@ -259,6 +272,9 @@ class AppEndpointTests(unittest.TestCase):
                         "surface": "codex",
                         "session_id": "s1",
                         "hook_event_name": "PostToolUse",
+                        "timeline": {"trace_id": "s1", "span_id": "e1", "sequence_no": 1, "duration_ms": 5},
+                        "operation": {"category": "tool", "phase": "after", "name": "PostToolUse", "success": True},
+                        "tool": {"name": "apply_patch", "files_written": ["src/app.py"]},
                         "environment_ref": "env1",
                         "session_ref": "sess1",
                         "content": {"tool_input": "*** Begin Patch\n*** Add File: src/app.py\n+print(1)\n*** End Patch\n"},
@@ -270,6 +286,8 @@ class AppEndpointTests(unittest.TestCase):
                         "surface": "codex",
                         "session_id": "s1",
                         "hook_event_name": "Stop",
+                        "timeline": {"trace_id": "s1", "span_id": "e2", "sequence_no": 2},
+                        "operation": {"category": "session", "phase": "stop", "name": "Stop", "success": True},
                         "environment_ref": "env1",
                         "session_ref": "sess1",
                         "workspace_diff": {"files": [{"path": "src/app.py", "additions": 1, "deletions": 0, "is_code": True}]},
@@ -290,11 +308,13 @@ class AppEndpointTests(unittest.TestCase):
                     sessions = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(sessions["sessions"][0]["session_id"], "s1")
                 self.assertEqual(sessions["sessions"][0]["code_metrics"]["generated_code"]["additions"], 1)
+                self.assertEqual(sessions["sessions"][0]["process"]["tool_counts"]["apply_patch"], 1)
 
                 with urllib.request.urlopen(f"{base_url}/sessions/s1", timeout=5) as response:
                     detail = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(detail["event_count"], 2)
                 self.assertEqual(detail["snapshots"]["environment"][0]["snapshot_id"], "env1")
+                self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")
 
                 with urllib.request.urlopen(f"{base_url}/metrics/code", timeout=5) as response:
                     metrics = json.loads(response.read().decode("utf-8"))

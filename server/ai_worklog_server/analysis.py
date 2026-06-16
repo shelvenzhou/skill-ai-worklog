@@ -31,6 +31,149 @@ def token_totals(records: list[dict[str, Any]]) -> dict[str, int]:
     return totals
 
 
+def nested_dict(record: dict[str, Any], key: str) -> dict[str, Any]:
+    value = record.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def operation_category(record: dict[str, Any]) -> str:
+    operation = nested_dict(record, "operation")
+    category = operation.get("category")
+    if isinstance(category, str) and category:
+        return category
+    hook = str(record.get("hook_event_name") or "").lower()
+    if "tool" in hook:
+        return "tool"
+    if "prompt" in hook:
+        return "prompt"
+    if "response" in hook:
+        return "response"
+    if "subagent" in hook:
+        return "subagent"
+    if hook in {"stop", "sessionend", "sessionstart"}:
+        return "session"
+    return "unknown"
+
+
+def operation_phase(record: dict[str, Any]) -> str:
+    operation = nested_dict(record, "operation")
+    phase = operation.get("phase")
+    return str(phase) if phase not in (None, "") else "event"
+
+
+def operation_success(record: dict[str, Any]) -> bool | None:
+    operation = nested_dict(record, "operation")
+    success = operation.get("success")
+    if isinstance(success, bool):
+        return success
+    tool = nested_dict(record, "tool")
+    tool_success = tool.get("success")
+    if isinstance(tool_success, bool):
+        return tool_success
+    return None
+
+
+def record_duration_ms(record: dict[str, Any]) -> float | None:
+    timeline = nested_dict(record, "timeline")
+    value = timeline.get("duration_ms")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def process_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    category_counts = Counter(operation_category(record) for record in records)
+    phase_counts = Counter(operation_phase(record) for record in records)
+    tool_counts: Counter[str] = Counter()
+    skill_counts: Counter[str] = Counter()
+    failures = 0
+    durations_by_category: dict[str, float] = defaultdict(float)
+    duration_event_counts: Counter[str] = Counter()
+
+    for record in records:
+        success = operation_success(record)
+        if success is False:
+            failures += 1
+
+        duration_ms = record_duration_ms(record)
+        if duration_ms is not None:
+            category = operation_category(record)
+            durations_by_category[category] += duration_ms
+            duration_event_counts[category] += 1
+
+        tool = nested_dict(record, "tool")
+        tool_name = tool.get("name")
+        if isinstance(tool_name, str) and tool_name:
+            tool_counts[tool_name] += 1
+
+        skill = nested_dict(record, "skill")
+        skill_name = skill.get("name")
+        if isinstance(skill_name, str) and skill_name:
+            skill_counts[skill_name] += 1
+
+    return {
+        "operation_category_counts": dict(sorted(category_counts.items())),
+        "operation_phase_counts": dict(sorted(phase_counts.items())),
+        "tool_counts": dict(sorted(tool_counts.items())),
+        "skill_counts": dict(sorted(skill_counts.items())),
+        "failure_count": failures,
+        "duration_ms_by_category": {
+            category: {
+                "total": round(total, 3),
+                "events": int(duration_event_counts[category]),
+                "avg": round(total / duration_event_counts[category], 3) if duration_event_counts[category] else 0,
+            }
+            for category, total in sorted(durations_by_category.items())
+        },
+    }
+
+
+def timeline_event(record: dict[str, Any]) -> dict[str, Any]:
+    timeline = nested_dict(record, "timeline")
+    operation = nested_dict(record, "operation")
+    tool = nested_dict(record, "tool")
+    skill = nested_dict(record, "skill")
+    item: dict[str, Any] = {
+        "event_id": record.get("event_id"),
+        "received_at": record_time(record),
+        "sequence_no": timeline.get("sequence_no"),
+        "hook_event_name": record.get("hook_event_name"),
+        "category": operation_category(record),
+        "phase": operation_phase(record),
+        "success": operation_success(record),
+        "duration_ms": record_duration_ms(record),
+    }
+    if tool:
+        item["tool"] = {
+            key: value
+            for key, value in {
+                "name": tool.get("name"),
+                "type": tool.get("type"),
+                "command": tool.get("command"),
+                "exit_code": tool.get("exit_code"),
+                "files_read": tool.get("files_read"),
+                "files_written": tool.get("files_written"),
+            }.items()
+            if value not in (None, [], {})
+        }
+    if skill:
+        item["skill"] = {
+            key: value
+            for key, value in {
+                "name": skill.get("name"),
+                "phase": skill.get("phase"),
+                "version": skill.get("version"),
+                "path": skill.get("path"),
+            }.items()
+            if value not in (None, "")
+        }
+    if operation.get("error_type"):
+        item["error_type"] = operation.get("error_type")
+    return {key: value for key, value in item.items() if value is not None}
+
+
 def summarize_session_records(
     session_id: str,
     records: list[dict[str, Any]],
@@ -59,6 +202,7 @@ def summarize_session_records(
         "hook_event_counts": dict(sorted(hook_counts.items())),
         "collection_levels": collection_levels,
         "token_totals": token_totals(ordered),
+        "process": process_summary(ordered),
         "code_metrics": {
             "generated_code": code_metrics.get("generated", {}),
             "adopted_code": code_metrics.get("adopted", {}),
@@ -91,6 +235,7 @@ def build_sessions_index(records: list[dict[str, Any]], limit: int = 50) -> dict
             "generated_code": code_metrics["generated_code"],
             "adopted_code": code_metrics["adopted_code"],
         },
+        "process": process_summary(event_records),
     }
 
 
@@ -118,6 +263,7 @@ def build_session_detail(
     return {
         "session": summary,
         "events": ordered[:bounded_limit],
+        "timeline": [timeline_event(record) for record in ordered[:bounded_limit]],
         "event_count": len(ordered),
         "returned_events": min(len(ordered), bounded_limit),
         "snapshots": classify_snapshots(snapshot_records),
@@ -125,4 +271,5 @@ def build_session_detail(
             "generated_code": code_metrics["generated_code"],
             "adopted_code": code_metrics["adopted_code"],
         },
+        "process": process_summary(ordered),
     }

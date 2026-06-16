@@ -82,6 +82,10 @@ Event records are written one per hook event:
 
 - `record_type = "event"`, `event_id`, `received_at`, `collector_version`
 - `surface`, `hook_event_name`, `session_id`, `turn_id`, `agent_id`, `agent_type`
+- `timeline`: `trace_id`, `span_id`, optional `parent_span_id`, per-session `sequence_no`, start/end timestamps, and duration when exposed
+- `operation`: normalized category, phase, success state, and error type when available
+- `tool`: normalized tool name/type, command, exit code, touched files, and duration when exposed by the hook payload
+- `skill`: optional skill name/path/version/phase when the host product or skill emits those fields
 - `content`: prompt, response, tool input/result, thought/summary when exposed by the product and enabled
 - `usage`: best-effort `token_count` info from transcript or hook payload
 - `environment_ref` and `session_ref`: stable hashes that point to snapshot records
@@ -94,6 +98,8 @@ The collector server also exposes `GET /metrics/code` for post-processed code me
 
 - `generated_code`: weak definition, parsed from successful post-write patch/file-edit payloads.
 - `adopted_code`: medium definition, latest session-end `git diff HEAD` code line counts still present in the worktree.
+
+The collector server exposes `GET /sessions` and `GET /sessions/<session_id>` for session browsing. These endpoints consume the structured `timeline`, `operation`, `tool`, and `skill` blocks to return process summaries, compact timelines, tool counts, skill counts, failure counts, and code metrics.
 
 ## Operations
 
