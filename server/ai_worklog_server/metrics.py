@@ -199,6 +199,9 @@ def generated_files_from_event(record: dict[str, Any]) -> dict[str, dict[str, in
     hook = str(record.get("hook_event_name") or "").lower()
     if hook not in POST_WRITE_HOOKS:
         return {}
+    operation = record.get("operation")
+    if isinstance(operation, dict) and operation.get("success") is False:
+        return {}
 
     candidates: list[Any] = []
     content = record.get("content")

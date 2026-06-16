@@ -182,6 +182,27 @@ class CodeMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["generated_code"]["events"], 1)
         self.assertEqual(metrics["by_session"]["s1"]["generated"]["additions"], 2)
 
+    def test_generated_code_ignores_failed_post_write_operations(self) -> None:
+        patch = """*** Begin Patch
+*** Add File: src/app.py
++print("failed")
+*** End Patch
+"""
+        metrics = compute_code_metrics(
+            [
+                {
+                    "record_type": "event",
+                    "event_id": "e1",
+                    "session_id": "s1",
+                    "hook_event_name": "PostToolUse",
+                    "operation": {"success": False},
+                    "content": {"tool_input": patch},
+                }
+            ]
+        )
+        self.assertEqual(metrics["generated_code"]["additions"], 0)
+        self.assertEqual(metrics["generated_code"]["events"], 0)
+
     def test_computes_adopted_code_from_latest_workspace_diff(self) -> None:
         metrics = compute_code_metrics(
             [
