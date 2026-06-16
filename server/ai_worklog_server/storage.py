@@ -236,6 +236,35 @@ class WorklogStore:
             rows = conn.execute(sql, args).fetchall()
         return [json.loads(row["raw_json"]) for row in rows]
 
+    def query_events_for_analysis(
+        self,
+        *,
+        surface: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = ["record_type = 'event'"]
+        args: list[Any] = []
+        if surface:
+            where.append("surface = ?")
+            args.append(surface)
+        if session_id:
+            where.append("session_id = ?")
+            args.append(session_id)
+        sql = "select raw_json from records where " + " and ".join(where) + " order by ingested_at asc"
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [json.loads(row["raw_json"]) for row in rows]
+
+    def query_snapshots_by_ids(self, snapshot_ids: list[str]) -> list[dict[str, Any]]:
+        ids = sorted({str(item) for item in snapshot_ids if item})
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        sql = f"select raw_json from records where record_type = 'snapshot' and snapshot_id in ({placeholders})"
+        with self._connect() as conn:
+            rows = conn.execute(sql, ids).fetchall()
+        return [json.loads(row["raw_json"]) for row in rows]
+
     def stats(self) -> dict[str, Any]:
         with self._connect() as conn:
             total = conn.execute("select count(*) as count from records").fetchone()["count"]

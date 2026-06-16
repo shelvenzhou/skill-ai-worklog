@@ -78,6 +78,8 @@ python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level off
 - `GET /healthz`: health check and record count.
 - `POST /events`: accepts one JSON record, a JSON array of records, or NDJSON.
 - `GET /records?limit=50&record_type=event&surface=codex&session_id=...`: recent indexed records.
+- `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, token totals, and code metrics.
+- `GET /sessions/<session_id>?limit=200&surface=codex`: chronological session events, snapshots, and session code metrics.
 - `GET /stats`: aggregate counts and token totals.
 - `GET /metrics/code?surface=codex&session_id=...`: post-processed generated/adopted code line metrics.
 
@@ -94,13 +96,19 @@ The client writes:
 - `~/.ai-worklog/snapshots/YYYY-MM-DD.jsonl`: deduplicated environment/session snapshots.
 - `~/.ai-worklog/failed/YYYY-MM-DD.jsonl`: upload failures for later replay.
 
-## Code Metrics
+## Server Analysis
 
-The collector includes a post-processing code metrics endpoint:
+The collector includes server-side analysis endpoints for session browsing and code metrics:
 
 ```bash
+curl 'http://127.0.0.1:8765/sessions?limit=20'
+curl 'http://127.0.0.1:8765/sessions/<SESSION_ID>?limit=200'
 curl 'http://127.0.0.1:8765/metrics/code'
 ```
+
+`/sessions` returns per-session summaries: event count, hook counts, token totals, environment/session refs, and generated/adopted code metrics.
+
+`/sessions/<SESSION_ID>` returns chronological events for one session plus the referenced environment/session snapshots and the same code metrics scoped to that session.
 
 Current metric definitions:
 

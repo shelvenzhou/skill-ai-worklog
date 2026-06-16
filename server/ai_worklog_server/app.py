@@ -7,8 +7,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
+from .analysis import build_session_detail, build_sessions_index
 from .metrics import compute_code_metrics
 from .storage import WorklogStore
 
@@ -76,6 +77,33 @@ class WorklogHandler(BaseHTTPRequestHandler):
                 session_id=(query.get("session_id") or [None])[0],
             )
             write_json(self, HTTPStatus.OK, compute_code_metrics(records))
+            return
+
+        if parsed.path == "/sessions":
+            query = parse_qs(parsed.query)
+            limit = int((query.get("limit") or ["50"])[0])
+            records = self.store.query_events_for_analysis(surface=(query.get("surface") or [None])[0])
+            write_json(self, HTTPStatus.OK, build_sessions_index(records, limit=limit))
+            return
+
+        if parsed.path.startswith("/sessions/"):
+            query = parse_qs(parsed.query)
+            session_id = unquote(parsed.path.removeprefix("/sessions/"))
+            if not session_id:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": "missing session id"})
+                return
+            limit = int((query.get("limit") or ["200"])[0])
+            surface = (query.get("surface") or [None])[0]
+            query_session_id = None if session_id == "unknown" else session_id
+            events = self.store.query_events_for_analysis(surface=surface, session_id=query_session_id)
+            snapshot_ids: list[str] = []
+            for event in events:
+                for key in ("environment_ref", "session_ref"):
+                    value = event.get(key)
+                    if value:
+                        snapshot_ids.append(str(value))
+            snapshots = self.store.query_snapshots_by_ids(snapshot_ids)
+            write_json(self, HTTPStatus.OK, build_session_detail(session_id, events, snapshots, limit=limit))
             return
 
         if parsed.path == "/records":
