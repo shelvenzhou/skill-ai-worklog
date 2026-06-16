@@ -201,12 +201,27 @@ def is_worklog_entry(entry: Any) -> bool:
             command = str(hook.get("command") or "")
             if ("ai-worklog" in command or "ai-usage-collector" in command) and (
                 "journal.py" in command
+                or "ai-worklog-hook" in command
                 or "collector.py" in command
                 or "codex_backfill.py" in command
                 or "codex_backfill_trigger.py" in command
             ):
                 return True
     return False
+
+
+def without_worklog_hooks(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return entry
+    entry_hooks = entry.get("hooks")
+    if not isinstance(entry_hooks, list):
+        return entry
+    filtered_hooks = [hook for hook in entry_hooks if not is_worklog_entry({"hooks": [hook]})]
+    if not filtered_hooks:
+        return None
+    updated = dict(entry)
+    updated["hooks"] = filtered_hooks
+    return updated
 
 
 def merge_hooks(path: Path, events: list[str], command: str, versioned: bool, dry_run: bool) -> None:
@@ -222,7 +237,7 @@ def merge_hooks(path: Path, events: list[str], command: str, versioned: bool, dr
         event_entries = hooks.get(existing_event)
         if not isinstance(event_entries, list):
             continue
-        filtered = [entry for entry in event_entries if not is_worklog_entry(entry)]
+        filtered = [entry for entry in (without_worklog_hooks(entry) for entry in event_entries) if entry is not None]
         if filtered:
             hooks[existing_event] = filtered
         else:
@@ -257,10 +272,16 @@ def remove_hooks(path: Path, versioned: bool, dry_run: bool) -> int:
             continue
         filtered = []
         for entry in event_entries:
-            if is_worklog_entry(entry):
-                removed += 1
-            else:
-                filtered.append(entry)
+            original_hooks = entry.get("hooks") if isinstance(entry, dict) else None
+            original_count = len(original_hooks) if isinstance(original_hooks, list) else 0
+            updated = without_worklog_hooks(entry)
+            if updated is None:
+                removed += max(1, original_count)
+                continue
+            updated_hooks = updated.get("hooks") if isinstance(updated, dict) else None
+            updated_count = len(updated_hooks) if isinstance(updated_hooks, list) else original_count
+            removed += max(0, original_count - updated_count)
+            filtered.append(updated)
         if filtered:
             hooks[existing_event] = filtered
         else:

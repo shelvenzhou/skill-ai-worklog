@@ -142,6 +142,47 @@ class InstallScriptTests(unittest.TestCase):
 
             self.assertEqual(installer.read_json(path), {"hooks": {}})
 
+    def test_windows_upgrade_rewrites_existing_hooks_without_bom(self) -> None:
+        installer = load_installer()
+        original_os_name = installer.os.name
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / "hooks.json"
+            old_command = r"C:\Users\user\.codex\skills\ai-worklog\scripts\ai-worklog-hook-codex.cmd"
+            other_command = "python other.py"
+            hooks_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "UserPromptSubmit": [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": old_command},
+                                        {"type": "command", "command": other_command},
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8-sig",
+            )
+            try:
+                installer.os.name = "nt"
+                installer.merge_hooks(hooks_path, ["UserPromptSubmit"], old_command, versioned=False, dry_run=False)
+            finally:
+                installer.os.name = original_os_name
+
+            raw = hooks_path.read_bytes()
+            self.assertEqual(raw[:1], b"{")
+            doc = json.loads(raw.decode("utf-8"))
+            entries = doc["hooks"]["UserPromptSubmit"]
+            commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+            self.assertEqual(commands.count(old_command), 1)
+            self.assertIn(other_command, commands)
+            worklog_hook = next(hook for entry in entries for hook in entry["hooks"] if hook["command"] == old_command)
+            self.assertEqual(worklog_hook["commandWindows"], old_command)
+
     def test_disable_config_marks_collection_off_without_deleting_paths(self) -> None:
         installer = load_installer()
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,7 +268,7 @@ class InstallScriptTests(unittest.TestCase):
                 {
                     "enabled": True,
                     "name": "ai-worklog",
-                    "current_version": "0.3.1",
+                    "current_version": "0.3.2",
                     "manifest_url": "https://example.com/manifest.json",
                     "source_url": "https://example.com/skill",
                     "trigger_interval_seconds": 86400,

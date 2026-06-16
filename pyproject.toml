@@ -1,6 +1,6 @@
 [project]
 name = "ai-worklog-observability"
-version = "0.3.1"
+version = "0.3.2"
 description = "Internal AI worklog client skill and collector server for Codex and Cursor."
 requires-python = ">=3.9"
 dependencies = []

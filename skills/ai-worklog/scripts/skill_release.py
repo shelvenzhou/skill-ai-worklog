@@ -8,7 +8,7 @@ from typing import Any
 
 
 DEFAULT_NAME = "ai-worklog"
-DEFAULT_VERSION = "0.3.1"
+DEFAULT_VERSION = "0.3.2"
 DEFAULT_EVENT_SCHEMA_VERSION = "0.3"
 
 
