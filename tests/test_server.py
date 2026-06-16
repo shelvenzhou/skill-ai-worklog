@@ -19,6 +19,19 @@ class ParseRecordsTests(unittest.TestCase):
         self.assertEqual(len(parse_records(b'[{"record_type":"event"},{"record_type":"snapshot"}]', "application/json")), 2)
         self.assertEqual(len(parse_records(b'{"record_type":"event"}\n{"record_type":"snapshot"}\n', "application/x-ndjson")), 2)
 
+    def test_parse_pretty_printed_json_with_newlines(self) -> None:
+        body = json.dumps(
+            [
+                {"record_type": "event", "event_id": "e1"},
+                {"record_type": "snapshot", "snapshot_id": "s1"},
+            ],
+            indent=2,
+        ).encode("utf-8")
+
+        records = parse_records(body, "application/json")
+
+        self.assertEqual([record["record_type"] for record in records], ["event", "snapshot"])
+
     def test_parse_record_pks(self) -> None:
         self.assertEqual(parse_record_pks(b'{"record_pks":["event:e1"]}'), ["event:e1"])
         self.assertEqual(parse_record_pks(b'["snapshot:s1"]'), ["snapshot:s1"])
@@ -477,6 +490,25 @@ class SessionAnalysisTests(unittest.TestCase):
             ]
         )
         self.assertEqual(index["sessions"][0]["token_totals"]["total_tokens"], 3)
+
+    def test_session_detail_limit_returns_latest_events(self) -> None:
+        events = [
+            {
+                "record_type": "event",
+                "event_id": f"e{index}",
+                "received_at": f"2026-06-16T01:0{index}:00Z",
+                "session_id": "s1",
+                "hook_event_name": "PostToolUse",
+            }
+            for index in range(5)
+        ]
+
+        detail = build_session_detail("s1", events, [], limit=2)
+
+        self.assertEqual([event["event_id"] for event in detail["events"]], ["e3", "e4"])
+        self.assertEqual([event["event_id"] for event in detail["timeline"]], ["e3", "e4"])
+        self.assertEqual(detail["event_count"], 5)
+        self.assertEqual(detail["returned_events"], 2)
 
     def test_session_detail_includes_transcript_agent_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

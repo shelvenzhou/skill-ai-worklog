@@ -383,6 +383,7 @@ def build_sessions_index(
     records: list[dict[str, Any]],
     limit: int = 50,
     snapshot_records: list[dict[str, Any]] | None = None,
+    total_sessions: int | None = None,
 ) -> dict[str, Any]:
     event_records = [record for record in records if record.get("record_type") == "event"]
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -403,9 +404,10 @@ def build_sessions_index(
     ]
     summaries.sort(key=lambda item: str(item.get("last_seen") or ""), reverse=True)
     bounded_limit = max(1, min(int(limit), 500))
+    session_count = len(summaries) if total_sessions is None else total_sessions
     return {
         "sessions": summaries[:bounded_limit],
-        "total_sessions": len(summaries),
+        "total_sessions": session_count,
         "returned_sessions": min(len(summaries), bounded_limit),
         "code_metrics": {
             "generated_code": code_metrics["generated_code"],
@@ -441,10 +443,11 @@ def build_session_detail(
     summary = summarize_session_records(session_id, ordered, code_metrics.get("by_session", {}), model_by_session)
     bounded_limit = max(1, min(int(limit), 1000))
     assistant_messages = transcript_agent_messages(session_id, snapshot_records)
-    combined_timeline_records = sorted([*ordered[:bounded_limit], *transcript_tool_events, *assistant_messages], key=record_time)
+    visible_events = ordered[-bounded_limit:]
+    combined_timeline_records = sorted([*visible_events, *transcript_tool_events, *assistant_messages], key=record_time)
     return {
         "session": summary,
-        "events": ordered[:bounded_limit],
+        "events": visible_events,
         "assistant_messages": assistant_messages,
         "transcript_tool_events": transcript_tool_events,
         "timeline": [timeline_event(record) for record in combined_timeline_records],

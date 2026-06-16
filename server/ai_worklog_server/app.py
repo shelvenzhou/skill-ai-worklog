@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +19,8 @@ def parse_records(body: bytes, content_type: str) -> list[dict[str, Any]]:
     text = body.decode("utf-8")
     if not text.strip():
         return []
-    if "application/x-ndjson" in content_type or "\n" in text.strip():
+
+    def parse_ndjson() -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for line in text.splitlines():
             if not line.strip():
@@ -29,7 +31,13 @@ def parse_records(body: bytes, content_type: str) -> list[dict[str, Any]]:
             records.append(item)
         return records
 
-    item = json.loads(text)
+    if "application/x-ndjson" in content_type:
+        return parse_ndjson()
+
+    try:
+        item = json.loads(text)
+    except json.JSONDecodeError:
+        return parse_ndjson()
     if isinstance(item, list):
         if not all(isinstance(record, dict) for record in item):
             raise ValueError("JSON array items must be objects")
@@ -546,6 +554,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 class WorklogHandler(BaseHTTPRequestHandler):
     store: WorklogStore
     bearer_token: str | None = None
+    sessions_cache: dict[tuple[int, int, str | None, int], dict[str, Any]] = {}
+    sessions_cache_lock = threading.Lock()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -591,7 +601,18 @@ class WorklogHandler(BaseHTTPRequestHandler):
         if parsed.path == "/sessions":
             query = parse_qs(parsed.query)
             limit = int((query.get("limit") or ["50"])[0])
-            records = self.store.query_events_for_analysis(surface=(query.get("surface") or [None])[0])
+            surface = (query.get("surface") or [None])[0]
+            cache_key = (id(self.store), self.store.cache_version(), surface, max(1, min(limit, 500)))
+            handler_cls = type(self)
+            with handler_cls.sessions_cache_lock:
+                cached = handler_cls.sessions_cache.get(cache_key)
+            if cached is not None:
+                write_json(self, HTTPStatus.OK, cached)
+                return
+            records, total_sessions = self.store.query_events_for_session_index(
+                surface=surface,
+                limit=limit,
+            )
             snapshot_ids: list[str] = []
             for event in records:
                 for key in ("environment_ref", "session_ref"):
@@ -599,7 +620,15 @@ class WorklogHandler(BaseHTTPRequestHandler):
                     if value:
                         snapshot_ids.append(str(value))
             snapshots = self.store.query_snapshots_by_ids(snapshot_ids)
-            write_json(self, HTTPStatus.OK, build_sessions_index(records, limit=limit, snapshot_records=snapshots))
+            payload = build_sessions_index(records, limit=limit, snapshot_records=snapshots, total_sessions=total_sessions)
+            with handler_cls.sessions_cache_lock:
+                handler_cls.sessions_cache = {
+                    key: value
+                    for key, value in handler_cls.sessions_cache.items()
+                    if key[0] == id(self.store) and key[1] == self.store.cache_version()
+                }
+                handler_cls.sessions_cache[cache_key] = payload
+            write_json(self, HTTPStatus.OK, payload)
             return
 
         if parsed.path.startswith("/sessions/"):
@@ -687,6 +716,8 @@ class WorklogHandler(BaseHTTPRequestHandler):
 def build_server(host: str, port: int, data_dir: Path, token: str | None) -> ThreadingHTTPServer:
     WorklogHandler.store = WorklogStore(data_dir)
     WorklogHandler.bearer_token = token
+    with WorklogHandler.sessions_cache_lock:
+        WorklogHandler.sessions_cache = {}
     return ThreadingHTTPServer((host, port), WorklogHandler)
 
 
