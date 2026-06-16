@@ -4,6 +4,7 @@ import json
 import threading
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -589,6 +590,67 @@ class SessionAnalysisTests(unittest.TestCase):
 
 
 class AppEndpointTests(unittest.TestCase):
+    def test_upload_and_ui_tokens_are_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = build_server("127.0.0.1", 0, Path(tmp), "upload-secret", "ui-secret")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                event_request = urllib.request.Request(
+                    f"{base_url}/events",
+                    data=json.dumps({"record_type": "event", "event_id": "e1"}).encode("utf-8"),
+                    headers={"Authorization": "Bearer upload-secret", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(event_request, timeout=5) as response:
+                    self.assertEqual(response.status, 202)
+
+                upload_read_request = urllib.request.Request(
+                    f"{base_url}/records",
+                    headers={"Authorization": "Bearer upload-secret"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(upload_read_request, timeout=5)
+                self.assertEqual(ctx.exception.code, 401)
+
+                ui_read_request = urllib.request.Request(
+                    f"{base_url}/records",
+                    headers={"Authorization": "Bearer ui-secret"},
+                )
+                with urllib.request.urlopen(ui_read_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["records"][0]["event_id"], "e1")
+
+                with urllib.request.urlopen(f"{base_url}/healthz", timeout=5) as response:
+                    health = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(health, {"ok": True})
+
+                class NoRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, newurl):
+                        return None
+
+                login_request = urllib.request.Request(
+                    f"{base_url}/auth/login",
+                    data=b"token=ui-secret",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                opener = urllib.request.build_opener(NoRedirect)
+                with self.assertRaises(urllib.error.HTTPError) as redirect_ctx:
+                    opener.open(login_request, timeout=5)
+                self.assertEqual(redirect_ctx.exception.code, 303)
+                cookie = redirect_ctx.exception.headers["Set-Cookie"].split(";", 1)[0]
+
+                ui_request = urllib.request.Request(f"{base_url}/ui", headers={"Cookie": cookie})
+                with urllib.request.urlopen(ui_request, timeout=5) as response:
+                    html = response.read().decode("utf-8")
+                self.assertIn("AI Worklog", html)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_session_and_code_metric_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = build_server("127.0.0.1", 0, Path(tmp), None)

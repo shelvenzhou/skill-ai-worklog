@@ -70,14 +70,15 @@ Run locally:
 python3 -m server.ai_worklog_server --host 127.0.0.1 --port 8765 --data-dir ./data
 ```
 
-With bearer-token authentication:
+With separate upload and dashboard tokens:
 
 ```bash
-export AI_WORKLOG_SERVER_TOKEN=server-secret
-python3 -m server.ai_worklog_server --token-env AI_WORKLOG_SERVER_TOKEN
+export AI_WORKLOG_SERVER_TOKEN=shared-upload-secret
+export AI_WORKLOG_UI_TOKEN=personal-ui-secret
+python3 -m server.ai_worklog_server --token-env AI_WORKLOG_SERVER_TOKEN --ui-token-env AI_WORKLOG_UI_TOKEN
 ```
 
-Open `http://127.0.0.1:8765/ui` for the dashboard.
+Client uploads send `AI_WORKLOG_API_KEY` as `Authorization: Bearer ...`; set it to the server's upload token. The UI token is separate and only authorizes the browser dashboard and read APIs. Open `http://127.0.0.1:8765/ui` and sign in with the UI token.
 
 ## Versioning
 
@@ -122,8 +123,8 @@ When `server_url` is configured, hook events trigger background replay uploads a
 
 ## API
 
-- `GET /` or `GET /ui`: browser dashboard.
-- `GET /healthz`: health check and record count.
+- `GET /` or `GET /ui`: browser dashboard, protected by the UI token when configured.
+- `GET /healthz`: public health check; record count is only included for authorized UI requests.
 - `POST /events`: accepts one JSON object, a JSON array, or NDJSON.
 - `POST /events/exists`: preflight deduplication by record primary key.
 - `GET /records?limit=50&record_type=event&surface=codex&session_id=...`: indexed records.

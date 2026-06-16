@@ -55,6 +55,26 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.strip(), "payload")
 
+    def test_python_command_uses_cmd_launcher_on_windows(self) -> None:
+        installer = load_installer()
+        original_os_name = installer.os.name
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "ai-worklog"
+            config_path = Path(tmp) / "config.json"
+            try:
+                installer.os.name = "nt"
+                command = installer.python_command(skill_dir, "codex", config_path)
+            finally:
+                installer.os.name = original_os_name
+
+            launcher = skill_dir / "scripts" / "ai-worklog-hook-codex.cmd"
+            content = launcher.read_text(encoding="utf-8")
+            self.assertIn(str(launcher), command)
+            self.assertNotIn("/bin/sh", command)
+            self.assertIn("if not exist", content)
+            self.assertIn("journal.py", content)
+            self.assertIn("--surface \"codex\"", content)
+
     def test_remove_hooks_removes_only_ai_worklog_entries(self) -> None:
         installer = load_installer()
         with tempfile.TemporaryDirectory() as tmp:

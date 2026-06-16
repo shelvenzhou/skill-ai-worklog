@@ -127,7 +127,32 @@ def copy_skill(destination: Path, dry_run: bool) -> Path:
     return dest
 
 
+def cmd_file_literal(value: str) -> str:
+    return value.replace("%", "%%")
+
+
+def write_windows_hook_launcher(skill_dir: Path, surface: str, config_path: Path) -> Path:
+    journal = skill_dir / "scripts" / "journal.py"
+    launcher = skill_dir / "scripts" / f"{SKILL_NAME}-hook-{surface}.cmd"
+    python = sys.executable or "python"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "@echo off\r\n"
+        f'if not exist "{cmd_file_literal(str(journal))}" exit /b 0\r\n'
+        f'"{cmd_file_literal(str(python))}" "{cmd_file_literal(str(journal))}" '
+        f'--surface "{cmd_file_literal(surface)}" '
+        f'--config "{cmd_file_literal(str(config_path))}" '
+        f'--source-id "{cmd_file_literal(SKILL_NAME)}"\r\n'
+    )
+    launcher.write_text(content, encoding="utf-8")
+    return launcher
+
+
 def python_command(skill_dir: Path, surface: str, config_path: Path) -> str:
+    if os.name == "nt":
+        launcher = write_windows_hook_launcher(skill_dir, surface, config_path)
+        return subprocess.list2cmdline([str(launcher)])
+
     journal = skill_dir / "scripts" / "journal.py"
     python = sys.executable or "python3"
     return (

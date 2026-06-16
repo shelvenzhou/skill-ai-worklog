@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import threading
@@ -79,6 +80,47 @@ def write_html(handler: BaseHTTPRequestHandler, status: int, html: str) -> None:
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def write_redirect(handler: BaseHTTPRequestHandler, location: str, headers: dict[str, str] | None = None) -> None:
+    handler.send_response(HTTPStatus.SEE_OTHER)
+    handler.send_header("Location", location)
+    if headers:
+        for key, value in headers.items():
+            handler.send_header(key, value)
+    handler.end_headers()
+
+
+LOGIN_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Worklog Login</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f7f4; color: #20221f; }
+    main { width: min(360px, calc(100vw - 32px)); }
+    h1 { margin: 0 0 18px; font-size: 20px; letter-spacing: 0; }
+    form { display: grid; gap: 10px; }
+    input, button { min-height: 38px; border: 1px solid #deded6; border-radius: 6px; padding: 0 10px; font: inherit; }
+    input { background: #fff; }
+    button { background: #206a5d; color: #fff; border-color: #206a5d; cursor: pointer; }
+    .error { min-height: 20px; color: #9f2f2f; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AI Worklog</h1>
+    <form method="post" action="/auth/login">
+      <input name="token" type="password" autocomplete="current-password" autofocus placeholder="Access token">
+      <button type="submit">Sign in</button>
+      <div class="error">{{ERROR}}</div>
+    </form>
+  </main>
+</body>
+</html>
+"""
 
 
 DASHBOARD_HTML = r"""<!doctype html>
@@ -553,25 +595,42 @@ DASHBOARD_HTML = r"""<!doctype html>
 
 class WorklogHandler(BaseHTTPRequestHandler):
     store: WorklogStore
-    bearer_token: str | None = None
+    upload_token: str | None = None
+    ui_token: str | None = None
+    auth_cookie_name = "ai_worklog_auth"
     sessions_cache: dict[tuple[int, int, str | None, int], dict[str, Any]] = {}
     sessions_cache_lock = threading.Lock()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in {"/", "/ui"}:
-            write_html(self, HTTPStatus.OK, DASHBOARD_HTML)
+        if parsed.path == "/auth/login":
+            write_html(self, HTTPStatus.OK, self.login_html())
+            return
+
+        if parsed.path == "/auth/logout":
+            write_redirect(
+                self,
+                "/auth/login",
+                {"Set-Cookie": f"{self.auth_cookie_name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"},
+            )
             return
 
         if parsed.path == "/healthz":
-            write_json(
-                self,
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "records": self.store.count_records(),
-                },
-            )
+            payload: dict[str, Any] = {"ok": True}
+            if self.ui_authorized():
+                payload["records"] = self.store.count_records()
+            write_json(self, HTTPStatus.OK, payload)
+            return
+
+        if not self.ui_authorized():
+            if parsed.path in {"/", "/ui"}:
+                write_html(self, HTTPStatus.UNAUTHORIZED, self.login_html())
+            else:
+                write_json(self, HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
+
+        if parsed.path in {"/", "/ui"}:
+            write_html(self, HTTPStatus.OK, DASHBOARD_HTML)
             return
 
         if parsed.path == "/stats":
@@ -667,10 +726,37 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/auth/login":
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            token = (parse_qs(body).get("token") or [""])[0]
+            if self.token_matches(self.ui_token, token):
+                write_redirect(
+                    self,
+                    "/ui",
+                    {
+                        "Set-Cookie": (
+                            f"{self.auth_cookie_name}={token}; Path=/; HttpOnly; "
+                            "SameSite=Strict; Max-Age=2592000"
+                        )
+                    },
+                )
+                return
+            write_html(self, HTTPStatus.UNAUTHORIZED, self.login_html("Invalid token"))
+            return
+
+        if parsed.path == "/auth/logout":
+            write_redirect(
+                self,
+                "/auth/login",
+                {"Set-Cookie": f"{self.auth_cookie_name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"},
+            )
+            return
+
         if parsed.path not in {"/events", "/events/exists"}:
             write_json(self, HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
-        if not self.authorized():
+        if not self.upload_authorized():
             write_json(self, HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
 
@@ -703,19 +789,57 @@ class WorklogHandler(BaseHTTPRequestHandler):
         result = self.store.insert_many(records)
         write_json(self, HTTPStatus.ACCEPTED, result)
 
-    def authorized(self) -> bool:
-        if not self.bearer_token:
+    def upload_authorized(self) -> bool:
+        if not self.upload_token:
             return True
-        expected = f"Bearer {self.bearer_token}"
-        return self.headers.get("Authorization") == expected
+        return self.token_matches(self.upload_token, self.bearer_header_token())
+
+    def ui_authorized(self) -> bool:
+        if not self.ui_token:
+            return self.upload_token is None
+        return self.token_matches(self.ui_token, self.bearer_header_token()) or self.token_matches(
+            self.ui_token,
+            self.cookie_token(),
+        )
+
+    def token_matches(self, expected: str | None, token: str | None) -> bool:
+        if not expected:
+            return True
+        if not token:
+            return False
+        return hmac.compare_digest(str(token), expected)
+
+    def bearer_header_token(self) -> str | None:
+        header = self.headers.get("Authorization") or ""
+        if not header.startswith("Bearer "):
+            return None
+        return header.removeprefix("Bearer ").strip()
+
+    def cookie_token(self) -> str | None:
+        raw = self.headers.get("Cookie") or ""
+        for chunk in raw.split(";"):
+            name, sep, value = chunk.strip().partition("=")
+            if sep and name == self.auth_cookie_name:
+                return value
+        return None
+
+    def login_html(self, error: str = "") -> str:
+        return LOGIN_HTML.replace("{{ERROR}}", error)
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}")
 
 
-def build_server(host: str, port: int, data_dir: Path, token: str | None) -> ThreadingHTTPServer:
+def build_server(
+    host: str,
+    port: int,
+    data_dir: Path,
+    upload_token: str | None,
+    ui_token: str | None = None,
+) -> ThreadingHTTPServer:
     WorklogHandler.store = WorklogStore(data_dir)
-    WorklogHandler.bearer_token = token
+    WorklogHandler.upload_token = upload_token
+    WorklogHandler.ui_token = ui_token
     with WorklogHandler.sessions_cache_lock:
         WorklogHandler.sessions_cache = {}
     return ThreadingHTTPServer((host, port), WorklogHandler)
@@ -727,14 +851,20 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("AI_WORKLOG_SERVER_PORT", "8765")))
     parser.add_argument("--data-dir", default=os.environ.get("AI_WORKLOG_SERVER_DATA_DIR", "./data"))
     parser.add_argument("--token-env", default="AI_WORKLOG_SERVER_TOKEN")
+    parser.add_argument("--ui-token-env", default="AI_WORKLOG_UI_TOKEN")
     args = parser.parse_args()
 
-    token = os.environ.get(args.token_env) if args.token_env else None
-    server = build_server(args.host, args.port, Path(args.data_dir), token)
+    upload_token = os.environ.get(args.token_env) if args.token_env else None
+    ui_token = os.environ.get(args.ui_token_env) if args.ui_token_env else None
+    server = build_server(args.host, args.port, Path(args.data_dir), upload_token, ui_token)
     print(f"AI Worklog collector listening on http://{args.host}:{args.port}")
     print(f"POST endpoint: http://{args.host}:{args.port}/events")
     print(f"Data directory: {Path(args.data_dir).expanduser().resolve()}")
-    if token:
-        print(f"Authorization: bearer token from ${args.token_env}")
+    if upload_token:
+        print(f"Upload authorization: bearer token from ${args.token_env}")
+    if ui_token:
+        print(f"UI authorization: token from ${args.ui_token_env}")
+    elif upload_token:
+        print("UI authorization: locked; set a separate UI token to enable dashboard access")
     server.serve_forever()
     return 0
