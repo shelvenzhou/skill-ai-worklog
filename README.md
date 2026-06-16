@@ -104,9 +104,9 @@ path that removes stale entries from Codex/Cursor hook config.
 - `POST /events`: accepts one JSON record, a JSON array of records, or NDJSON.
 - `POST /events/exists`: accepts `{"record_pks":["event:..."]}` and returns existing/missing keys for preflight upload negotiation.
 - `GET /records?limit=50&record_type=event&surface=codex&session_id=...`: recent indexed records.
-- `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, process/tool/skill counts, token totals, and code metrics.
+- `GET /sessions?limit=50&surface=codex`: session summaries with hook counts, process/tool/skill counts, token totals, token totals by model, and code metrics.
 - `GET /sessions/<session_id>?limit=200&surface=codex`: chronological session events, compact timeline, snapshots, process summary, and session code metrics.
-- `GET /stats`: aggregate counts and token totals.
+- `GET /stats`: aggregate counts, token totals, and token totals by model.
 - `GET /metrics/code?surface=codex&session_id=...`: post-processed generated/adopted/uncommitted code line metrics.
 
 ## Data Layout
@@ -140,7 +140,7 @@ curl 'http://127.0.0.1:8765/sessions/<SESSION_ID>?limit=200'
 curl 'http://127.0.0.1:8765/metrics/code'
 ```
 
-`/sessions` returns per-session summaries: event count, hook counts, operation category counts, tool/skill counts, failure counts, token totals, environment/session refs, and generated/adopted/uncommitted code metrics.
+`/sessions` returns per-session summaries: event count, hook counts, operation category counts, tool/skill counts, failure counts, token totals, token totals by model, environment/session refs, and generated/adopted/uncommitted code metrics.
 
 `/sessions/<SESSION_ID>` returns chronological events for one session plus a compact `timeline` view, transcript-derived agent messages when the local `transcript_path` is readable, the referenced environment/session snapshots, process summary, and the same code metrics scoped to that session.
 

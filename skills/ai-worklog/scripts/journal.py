@@ -632,18 +632,19 @@ def tail_text(path: Path, max_bytes: int) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def extract_transcript_usage(transcript_path: str | None, max_bytes: int) -> dict[str, Any] | None:
+def extract_transcript_context(transcript_path: str | None, max_bytes: int) -> dict[str, Any]:
     if not transcript_path:
-        return None
+        return {"usage": None, "model": None}
     path = Path(transcript_path).expanduser()
     if not path.exists() or not path.is_file():
-        return None
+        return {"usage": None, "model": None}
     try:
         lines = tail_text(path, max_bytes).splitlines()
     except Exception:
-        return None
+        return {"usage": None, "model": None}
 
     latest: dict[str, Any] | None = None
+    latest_model: str | None = None
     for line in lines:
         try:
             item = json.loads(line)
@@ -659,7 +660,17 @@ def extract_transcript_usage(transcript_path: str | None, max_bytes: int) -> dic
                 "info": payload.get("info"),
                 "rate_limits": payload.get("rate_limits"),
             }
-    return latest
+        if item.get("type") in {"session_meta", "turn_context"}:
+            model = string_value(value_at(payload, "model", "model_name", "modelName"))
+            if model:
+                latest_model = model
+    return {"usage": latest, "model": latest_model}
+
+
+def extract_transcript_usage(transcript_path: str | None, max_bytes: int) -> dict[str, Any] | None:
+    context = extract_transcript_context(transcript_path, max_bytes)
+    usage = context.get("usage")
+    return usage if isinstance(usage, dict) else None
 
 
 def is_session_stop_hook(hook_event_name: str) -> bool:
@@ -710,9 +721,25 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
     )
     transcript_path = value_at(payload, "transcript_path", "transcriptPath")
     cwd = value_at(payload, "cwd", "workspace_path", "workspacePath")
+    max_transcript_bytes = int(cfg.get("max_transcript_bytes") or DEFAULT_MAX_TRANSCRIPT_BYTES)
+    payload_model = string_value(value_at(payload, "model", "model_name", "modelName"))
+    should_read_transcript = bool(
+        transcript_path
+        and (
+            not payload_model
+            or (level != "basic" and cfg.get("capture", {}).get("token_usage_from_transcript", True))
+        )
+    )
+    transcript_context = (
+        extract_transcript_context(str(transcript_path), max_transcript_bytes)
+        if should_read_transcript
+        else {"usage": None, "model": None}
+    )
     env = environment_metadata(str(cwd) if cwd else None)
     env_ref = stable_hash(env)
     session = compact_session_metadata(payload, surface, str(cwd) if cwd else None, str(transcript_path) if transcript_path else None)
+    if not session.get("model"):
+        session["model"] = string_value(transcript_context.get("model"))
     session_ref = stable_hash(session)
     received_at = utc_now()
     event_id = str(uuid.uuid4())
@@ -741,6 +768,7 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
         "turn_id": value_at(payload, "turn_id", "turnId"),
         "agent_id": session["agent_id"],
         "agent_type": session["agent_type"],
+        "model": session["model"],
         "environment_ref": env_ref,
         "session_ref": session_ref,
         "timeline": {key: value for key, value in timeline.items() if value is not None},
@@ -756,10 +784,7 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
     if level != "basic":
         event["content"] = extract_content(payload, level, hook_event_name)
         if cfg.get("capture", {}).get("token_usage_from_transcript", True):
-            event["usage"] = extract_transcript_usage(
-                transcript_path,
-                int(cfg.get("max_transcript_bytes") or DEFAULT_MAX_TRANSCRIPT_BYTES),
-            )
+            event["usage"] = transcript_context.get("usage")
         hook_usage = value_at(payload, "usage", "token_usage", "tokenUsage")
         if hook_usage is not None:
             event["hook_usage"] = hook_usage if level == "full" else summarize_value(hook_usage)

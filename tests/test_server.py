@@ -113,6 +113,49 @@ class StoreTests(unittest.TestCase):
             )
             self.assertEqual(store.stats()["token_totals"]["total_tokens"], 15)
 
+    def test_stats_groups_token_totals_by_model(self) -> None:
+        repeated_usage = {
+            "source": "transcript_token_count",
+            "timestamp": "2026-06-16T00:00:00Z",
+            "info": {"last_token_usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 5, "total_tokens": 15}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            store.insert_many(
+                [
+                    {
+                        "record_type": "event",
+                        "event_id": "e1",
+                        "session_id": "s1",
+                        "model": "gpt-a",
+                        "usage": repeated_usage,
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "e2",
+                        "session_id": "s1",
+                        "model": "gpt-a",
+                        "usage": repeated_usage,
+                    },
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "sess2",
+                        "snapshot_type": "session",
+                        "session": {"session_id": "s2", "model": "gpt-b"},
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "e3",
+                        "session_id": "s2",
+                        "hook_usage": {"last_token_usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}},
+                    },
+                ]
+            )
+            by_model = store.stats()["token_totals_by_model"]
+            self.assertEqual(by_model["gpt-a"]["total_tokens"], 15)
+            self.assertEqual(by_model["gpt-a"]["cached_input_tokens"], 4)
+            self.assertEqual(by_model["gpt-b"]["total_tokens"], 5)
+
     def test_queries_events_and_snapshots_for_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WorklogStore(Path(tmp))
@@ -381,10 +424,15 @@ class SessionAnalysisTests(unittest.TestCase):
         ]
         snapshots = [
             {"record_type": "snapshot", "snapshot_id": "env1", "snapshot_type": "environment"},
-            {"record_type": "snapshot", "snapshot_id": "sess1", "snapshot_type": "session"},
+            {
+                "record_type": "snapshot",
+                "snapshot_id": "sess1",
+                "snapshot_type": "session",
+                "session": {"session_id": "s1", "model": "gpt-test"},
+            },
         ]
 
-        index = build_sessions_index(events)
+        index = build_sessions_index(events, snapshot_records=snapshots)
         self.assertEqual(index["total_sessions"], 2)
         first = index["sessions"][0]
         self.assertEqual(first["session_id"], "s2")
@@ -393,6 +441,7 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(s1["code_metrics"]["adopted_code"]["additions"], 2)
         self.assertEqual(s1["code_metrics"]["uncommitted_code"]["additions"], 2)
         self.assertEqual(s1["token_totals"]["total_tokens"], 3)
+        self.assertEqual(s1["token_totals_by_model"]["gpt-test"]["total_tokens"], 3)
         self.assertEqual(s1["process"]["operation_category_counts"]["tool"], 1)
         self.assertEqual(s1["process"]["tool_counts"]["apply_patch"], 1)
         self.assertEqual(s1["process"]["skill_counts"]["code-fix"], 1)
@@ -403,6 +452,7 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["snapshots"]["environment"][0]["snapshot_id"], "env1")
         self.assertEqual(detail["code_metrics"]["generated_code"]["additions"], 2)
         self.assertEqual(detail["code_metrics"]["uncommitted_code"]["additions"], 2)
+        self.assertEqual(detail["session"]["token_totals_by_model"]["gpt-test"]["total_tokens"], 3)
         self.assertEqual([event["event_id"] for event in detail["events"]], ["e1", "e2"])
         self.assertEqual(detail["timeline"][0]["category"], "tool")
         self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")

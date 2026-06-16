@@ -27,6 +27,7 @@ class JournalTests(unittest.TestCase):
         event, snapshots = journal.build_records(payload, journal.default_config(), "codex", "test")
         assert event is not None
         self.assertEqual(event["surface"], "codex")
+        self.assertEqual(event["model"], "gpt-test")
         self.assertEqual(event["content"]["prompt"], "fix this")
         self.assertEqual(event["content"]["tool_input"], {"cmd": "echo hi"})
         self.assertEqual(len(snapshots), 2)
@@ -50,6 +51,7 @@ class JournalTests(unittest.TestCase):
             path.write_text(
                 "\n".join(
                     [
+                        json.dumps({"type": "turn_context", "payload": {"model": "gpt-transcript"}}),
                         json.dumps({"type": "event_msg", "payload": {"type": "other"}}),
                         json.dumps(
                             {
@@ -77,6 +79,25 @@ class JournalTests(unittest.TestCase):
             usage = journal.extract_transcript_usage(str(path), 1024)
             assert usage is not None
             self.assertEqual(usage["info"]["last_token_usage"]["reasoning_output_tokens"], 3)
+            context = journal.extract_transcript_context(str(path), 1024)
+            self.assertEqual(context["model"], "gpt-transcript")
+
+    def test_build_event_uses_transcript_model_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            path.write_text(
+                json.dumps({"type": "turn_context", "payload": {"model": "gpt-transcript"}}) + "\n",
+                encoding="utf-8",
+            )
+            event, snapshots = journal.build_records(
+                {"hook_event_name": "SessionStart", "session_id": "s1", "transcript_path": str(path)},
+                journal.default_config(),
+                "codex",
+                "test",
+            )
+            assert event is not None
+            self.assertEqual(event["model"], "gpt-transcript")
+            self.assertEqual(snapshots[1]["session"]["model"], "gpt-transcript")
 
     def test_sensitive_keys_are_redacted(self) -> None:
         event, _ = journal.build_records(

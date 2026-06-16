@@ -7,6 +7,14 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+TOKEN_TOTAL_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
 
 SCHEMA = """
 create table if not exists records (
@@ -75,13 +83,7 @@ def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
             return int(value)
         return None
 
-    return {
-        "input_tokens": as_int("input_tokens"),
-        "cached_input_tokens": as_int("cached_input_tokens"),
-        "output_tokens": as_int("output_tokens"),
-        "reasoning_output_tokens": as_int("reasoning_output_tokens"),
-        "total_tokens": as_int("total_tokens"),
-    }
+    return {key: as_int(key) for key in TOKEN_TOTAL_KEYS}
 
 
 def token_usage_identity(record: dict[str, Any]) -> str | None:
@@ -106,13 +108,7 @@ def token_usage_identity(record: dict[str, Any]) -> str | None:
 
 
 def token_totals(records: list[dict[str, Any]]) -> dict[str, int]:
-    totals = {
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_output_tokens": 0,
-        "total_tokens": 0,
-    }
+    totals = {key: 0 for key in TOKEN_TOTAL_KEYS}
     seen_usage: set[str] = set()
     for record in records:
         identity = token_usage_identity(record)
@@ -123,6 +119,69 @@ def token_totals(records: list[dict[str, Any]]) -> dict[str, int]:
         for key in totals:
             totals[key] += int(usage.get(key) or 0)
     return totals
+
+
+def session_models(records: list[dict[str, Any]]) -> dict[str, str]:
+    models: dict[str, str] = {}
+    for record in records:
+        session_id = record.get("session_id")
+        model = record.get("model")
+        if isinstance(session_id, str) and session_id and isinstance(model, str) and model:
+            models.setdefault(session_id, model)
+            continue
+
+        if record.get("record_type") != "snapshot" or record.get("snapshot_type") != "session":
+            continue
+        session = record.get("session")
+        if not isinstance(session, dict):
+            continue
+        session_id = session.get("session_id")
+        model = session.get("model")
+        if isinstance(session_id, str) and session_id and isinstance(model, str) and model:
+            models.setdefault(session_id, model)
+    return models
+
+
+def token_model(record: dict[str, Any], model_by_session: dict[str, str] | None = None) -> str:
+    for key in ("model", "model_name", "modelName"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    for usage_key in ("usage", "hook_usage"):
+        usage = record.get(usage_key)
+        if not isinstance(usage, dict):
+            continue
+        for key in ("model", "model_name", "modelName"):
+            value = usage.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    session_id = record.get("session_id")
+    if isinstance(session_id, str) and model_by_session and model_by_session.get(session_id):
+        return model_by_session[session_id]
+
+    return "unknown"
+
+
+def token_totals_by_model(
+    records: list[dict[str, Any]],
+    model_by_session: dict[str, str] | None = None,
+) -> dict[str, dict[str, int]]:
+    model_by_session = model_by_session or session_models(records)
+    totals_by_model: dict[str, dict[str, int]] = {}
+    seen_usage: set[str] = set()
+    for record in records:
+        identity = token_usage_identity(record)
+        if identity is None or identity in seen_usage:
+            continue
+        seen_usage.add(identity)
+        model = token_model(record, model_by_session)
+        totals = totals_by_model.setdefault(model, {key: 0 for key in TOKEN_TOTAL_KEYS})
+        usage = token_usage(record)
+        for key in totals:
+            totals[key] += int(usage.get(key) or 0)
+    return dict(sorted(totals_by_model.items()))
 
 
 def record_pk(record: dict[str, Any]) -> str:
@@ -336,11 +395,13 @@ class WorklogStore:
                 """
             ).fetchall()
             raw_rows = conn.execute("select raw_json from records order by ingested_at asc").fetchall()
-        totals = token_totals([json.loads(row["raw_json"]) for row in raw_rows])
+        records = [json.loads(row["raw_json"]) for row in raw_rows]
+        totals = token_totals(records)
         return {
             "total_records": int(total),
             "by_record_type": {row["key"]: int(row["count"]) for row in by_type},
             "by_surface": {row["key"]: int(row["count"]) for row in by_surface},
             "by_hook_event_name": {row["key"]: int(row["count"]) for row in by_hook},
             "token_totals": totals,
+            "token_totals_by_model": token_totals_by_model(records),
         }
