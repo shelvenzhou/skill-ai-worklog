@@ -139,7 +139,14 @@ class JournalTests(unittest.TestCase):
             first = journal.write_new_snapshots(snapshots, cfg)
             second = journal.write_new_snapshots(snapshots, cfg)
             self.assertEqual(len(first), 2)
-            self.assertEqual(len(second), 0)
+            self.assertEqual(len(second), 2)
+            snapshot_files = list((Path(tmp) / "snapshots").glob("*.jsonl"))
+            self.assertEqual(len(snapshot_files), 1)
+            self.assertEqual(len(snapshot_files[0].read_text(encoding="utf-8").splitlines()), 2)
+            for snapshot in snapshots:
+                journal.mark_remote_snapshot_known(snapshot, cfg)
+            third = journal.write_new_snapshots(snapshots, cfg)
+            self.assertEqual(len(third), 0)
 
     def test_upload_preflight_skips_existing_record(self) -> None:
         class FakeResponse:

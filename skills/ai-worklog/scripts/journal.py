@@ -813,6 +813,8 @@ def load_state(path: Path) -> dict[str, Any]:
     state = load_json(path)
     if not isinstance(state.get("snapshot_ids"), list):
         state["snapshot_ids"] = []
+    if not isinstance(state.get("remote_snapshot_ids"), list):
+        state["remote_snapshot_ids"] = []
     if not isinstance(state.get("session_sequences"), dict):
         state["session_sequences"] = {}
     return state
@@ -826,19 +828,33 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 def write_new_snapshots(snapshots: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
     path = state_path(cfg)
     state = load_state(path)
-    known = set(str(item) for item in state.get("snapshot_ids", []))
-    new_snapshots: list[dict[str, Any]] = []
+    local_known = set(str(item) for item in state.get("snapshot_ids", []))
+    remote_known = set(str(item) for item in state.get("remote_snapshot_ids", []))
+    upload_candidates: list[dict[str, Any]] = []
     snapshot_dir = Path(str(cfg.get("snapshot_log_dir") or DEFAULT_HOME / "snapshots")).expanduser()
     for snapshot in snapshots:
         snapshot_id = str(snapshot.get("snapshot_id"))
-        if snapshot_id in known:
-            continue
-        append_jsonl(snapshot_dir, snapshot)
-        known.add(snapshot_id)
-        new_snapshots.append(snapshot)
-    state["snapshot_ids"] = sorted(known)
+        if snapshot_id not in local_known:
+            append_jsonl(snapshot_dir, snapshot)
+            local_known.add(snapshot_id)
+        if snapshot_id not in remote_known:
+            upload_candidates.append(snapshot)
+    state["snapshot_ids"] = sorted(local_known)
+    state["remote_snapshot_ids"] = sorted(remote_known)
     save_state(path, state)
-    return new_snapshots
+    return upload_candidates
+
+
+def mark_remote_snapshot_known(snapshot: dict[str, Any], cfg: dict[str, Any]) -> None:
+    snapshot_id = snapshot.get("snapshot_id")
+    if not snapshot_id:
+        return
+    path = state_path(cfg)
+    state = load_state(path)
+    remote_known = set(str(item) for item in state.get("remote_snapshot_ids", []))
+    remote_known.add(str(snapshot_id))
+    state["remote_snapshot_ids"] = sorted(remote_known)
+    save_state(path, state)
 
 
 def assign_event_sequence(event: dict[str, Any], cfg: dict[str, Any]) -> None:
@@ -953,6 +969,8 @@ def main() -> int:
         ok, error = upload_event(snapshot, cfg)
         if not ok:
             spool_failed(snapshot, cfg, error)
+        else:
+            mark_remote_snapshot_known(snapshot, cfg)
 
     local_log_dir = Path(str(cfg.get("local_log_dir") or DEFAULT_HOME / "events")).expanduser()
     append_jsonl(local_log_dir, event)
