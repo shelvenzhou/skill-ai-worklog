@@ -177,12 +177,15 @@ def shell_quote(value: str) -> str:
 
 
 def hook_entry(command: str) -> dict[str, Any]:
+    hook: dict[str, Any] = {
+        "type": "command",
+        "command": command,
+    }
+    if os.name == "nt":
+        hook["commandWindows"] = command
     return {
         "hooks": [
-            {
-                "type": "command",
-                "command": command,
-            }
+            hook
         ]
     }
 

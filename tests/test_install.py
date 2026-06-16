@@ -75,6 +75,15 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("journal.py", content)
             self.assertIn("--surface \"codex\"", content)
 
+            try:
+                installer.os.name = "nt"
+                entry = installer.hook_entry(command)
+            finally:
+                installer.os.name = original_os_name
+            hook = entry["hooks"][0]
+            self.assertEqual(hook["command"], command)
+            self.assertEqual(hook["commandWindows"], command)
+
     def test_remove_hooks_removes_only_ai_worklog_entries(self) -> None:
         installer = load_installer()
         with tempfile.TemporaryDirectory() as tmp:
