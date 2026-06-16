@@ -14,9 +14,19 @@ from typing import Any
 
 
 SKILL_NAME = "ai-worklog"
+SKILL_VERSION = "0.3.0"
 CONFIG_HOME = Path.home() / ".ai-worklog"
 CONFIG_PATH = CONFIG_HOME / "config.json"
 DEFAULT_BACKFILL_MAX_RUNTIME_SECONDS = 30 * 60
+DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS = 60
+DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS = 10 * 60
+DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS = 2 * 60
+DEFAULT_SKILL_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_SKILL_UPDATE_MANIFEST_URL = (
+    "https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/"
+    "master/skills/ai-worklog/skill-version.json"
+)
+DEFAULT_SKILL_SOURCE_URL = "https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog"
 CODEX_MINIMAL_EVENTS = [
     "SessionStart",
     "UserPromptSubmit",
@@ -244,6 +254,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
             "server_url": args.server_url,
             "api_key_env": args.api_key_env,
             "request_timeout_seconds": args.timeout,
+            "upload_mode": "sync" if args.sync_upload else "async",
             "upload_preflight": not args.no_upload_preflight,
             "max_transcript_bytes": args.max_transcript_bytes,
             "hook_set": args.hook_set,
@@ -268,6 +279,21 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
         "trigger_interval_seconds": args.backfill_trigger_interval_seconds,
         "lock_stale_seconds": args.backfill_lock_stale_seconds,
         "max_runtime_seconds": args.backfill_max_runtime_seconds,
+    }
+    cfg["async_upload"] = {
+        "enabled": not args.sync_upload,
+        "batch_size": args.async_upload_batch_size,
+        "trigger_interval_seconds": args.async_upload_trigger_interval_seconds,
+        "lock_stale_seconds": args.async_upload_lock_stale_seconds,
+        "max_runtime_seconds": args.async_upload_max_runtime_seconds,
+    }
+    cfg["skill_update"] = {
+        "enabled": not args.no_skill_update_check,
+        "name": SKILL_NAME,
+        "current_version": SKILL_VERSION,
+        "manifest_url": args.skill_update_manifest_url,
+        "source_url": args.skill_source_url,
+        "trigger_interval_seconds": args.skill_update_trigger_interval_seconds,
     }
     if args.backfill_limit is not None:
         cfg["codex_history_backfill"]["limit"] = args.backfill_limit
@@ -448,8 +474,13 @@ def main() -> int:
     parser.add_argument("--snapshot-log-dir", default=str(CONFIG_HOME / "snapshots"))
     parser.add_argument("--failed-log-dir", default=str(CONFIG_HOME / "failed"))
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--sync-upload", action="store_true", help="Upload from the hook process instead of using background replay.")
     parser.add_argument("--no-upload-preflight", action="store_true", help="Upload records directly without checking /events/exists first.")
     parser.add_argument("--max-transcript-bytes", type=int, default=5 * 1024 * 1024)
+    parser.add_argument("--async-upload-batch-size", type=int, default=100, help="Records per background replay upload batch.")
+    parser.add_argument("--async-upload-trigger-interval-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS, help="Minimum seconds between background upload trigger attempts.")
+    parser.add_argument("--async-upload-lock-stale-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS, help="Seconds before a background upload lock is considered stale.")
+    parser.add_argument("--async-upload-max-runtime-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS, help="Maximum seconds a background upload replay subprocess may run.")
     parser.add_argument("--backfill-codex-history", action="store_true", help="After installing Codex hooks, upload historical ~/.codex/sessions transcripts.")
     parser.add_argument("--backfill-batch-size", type=int, default=250, help="Records per historical backfill preflight/upload request.")
     parser.add_argument("--backfill-limit", type=int, help="Maximum historical Codex transcript files to process, newest first.")
@@ -463,6 +494,23 @@ def main() -> int:
         default=DEFAULT_BACKFILL_MAX_RUNTIME_SECONDS,
         help="Maximum seconds a Codex historical backfill subprocess may run.",
     )
+    parser.add_argument(
+        "--skill-update-manifest-url",
+        default=os.environ.get("AI_WORKLOG_UPDATE_MANIFEST_URL") or DEFAULT_SKILL_UPDATE_MANIFEST_URL,
+        help="Raw JSON manifest URL used to check for newer ai-worklog skill versions.",
+    )
+    parser.add_argument(
+        "--skill-source-url",
+        default=os.environ.get("AI_WORKLOG_SKILL_SOURCE_URL") or DEFAULT_SKILL_SOURCE_URL,
+        help="Human-readable skill source URL shown in update prompts.",
+    )
+    parser.add_argument(
+        "--skill-update-trigger-interval-seconds",
+        type=int,
+        default=DEFAULT_SKILL_UPDATE_INTERVAL_SECONDS,
+        help="Minimum seconds between background remote skill version checks.",
+    )
+    parser.add_argument("--no-skill-update-check", action="store_true", help="Disable background remote skill version checks.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

@@ -26,6 +26,9 @@ DEFAULT_HOME = Path.home() / ".ai-worklog"
 DEFAULT_CONFIG_PATH = DEFAULT_HOME / "config.json"
 DEFAULT_MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 2.0
+DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS = 60
+DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS = 10 * 60
+DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS = 2 * 60
 SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -137,7 +140,22 @@ def default_config() -> dict[str, Any]:
         "server_url": None,
         "api_key_env": "AI_WORKLOG_API_KEY",
         "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        "upload_mode": "async",
         "upload_preflight": True,
+        "async_upload": {
+            "enabled": True,
+            "batch_size": 100,
+            "trigger_interval_seconds": DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS,
+            "lock_stale_seconds": DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS,
+            "max_runtime_seconds": DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS,
+        },
+        "skill_update": {
+            "enabled": True,
+            "name": "ai-worklog",
+            "current_version": VERSION,
+            "trigger_interval_seconds": 24 * 60 * 60,
+            "notify_interval_seconds": 24 * 60 * 60,
+        },
         "max_transcript_bytes": DEFAULT_MAX_TRANSCRIPT_BYTES,
         "capture": {
             "raw_hook_input": True,
@@ -177,6 +195,11 @@ def request_timeout_seconds(cfg: dict[str, Any]) -> float:
     if not math.isfinite(value) or value <= 0:
         return DEFAULT_REQUEST_TIMEOUT_SECONDS
     return value
+
+
+def upload_mode(cfg: dict[str, Any]) -> str:
+    value = str(cfg.get("upload_mode") or "async").lower()
+    return value if value in {"async", "sync", "local"} else "async"
 
 
 def read_stdin_json() -> dict[str, Any]:
@@ -689,6 +712,10 @@ def is_session_stop_hook(hook_event_name: str) -> bool:
     return hook_event_name in {"Stop", "stop", "sessionEnd", "SessionEnd", "session_end"}
 
 
+def is_session_start_hook(hook_event_name: str) -> bool:
+    return hook_event_name in {"SessionStart", "sessionStart", "workspaceOpen", "session_start"}
+
+
 def extract_content(payload: dict[str, Any], level: str, hook_event_name: str = "") -> dict[str, Any]:
     content: dict[str, Any] = {}
     prompt = value_at(payload, "prompt", "user_prompt", "message")
@@ -998,7 +1025,32 @@ def auto_codex_backfill_enabled(cfg: dict[str, Any]) -> bool:
     section = cfg.get("codex_history_backfill")
     if isinstance(section, dict) and section.get("enabled") is False:
         return False
-    return bool(cfg.get("server_url"))
+    return bool(cfg.get("server_url")) and upload_mode(cfg) != "local"
+
+
+def async_upload_enabled(cfg: dict[str, Any]) -> bool:
+    section = cfg.get("async_upload")
+    if isinstance(section, dict) and section.get("enabled") is False:
+        return False
+    return bool(cfg.get("server_url")) and upload_mode(cfg) == "async"
+
+
+def maybe_spawn_async_upload(cfg: dict[str, Any], config_path: Path) -> None:
+    if not async_upload_enabled(cfg):
+        return
+    script = Path(__file__).resolve().with_name("async_upload_trigger.py")
+    if not script.exists():
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable or "python3", str(script), "--config", str(config_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return
 
 
 def maybe_spawn_codex_backfill(payload: dict[str, Any], cfg: dict[str, Any], surface: str, config_path: Path) -> None:
@@ -1024,6 +1076,102 @@ def maybe_spawn_codex_backfill(payload: dict[str, Any], cfg: dict[str, Any], sur
         return
 
 
+def skill_update_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    section = cfg.get("skill_update")
+    return section if isinstance(section, dict) else {}
+
+
+def skill_update_enabled(cfg: dict[str, Any]) -> bool:
+    section = skill_update_config(cfg)
+    if section.get("enabled") is False:
+        return False
+    return bool(section.get("manifest_url") or os.environ.get("AI_WORKLOG_UPDATE_MANIFEST_URL"))
+
+
+def skill_update_state_path(cfg: dict[str, Any]) -> Path:
+    explicit = skill_update_config(cfg).get("state_path")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    return DEFAULT_HOME / "skill_update_state.json"
+
+
+def skill_update_notice_path(cfg: dict[str, Any]) -> Path:
+    explicit = skill_update_config(cfg).get("notice_path")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    return DEFAULT_HOME / "skill_update_notice.txt"
+
+
+def skill_update_notify_interval_seconds(cfg: dict[str, Any]) -> int:
+    value = skill_update_config(cfg).get("notify_interval_seconds")
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 24 * 60 * 60
+
+
+def maybe_emit_skill_update_notice(payload: dict[str, Any], cfg: dict[str, Any]) -> None:
+    hook_event_name = str(
+        value_at(payload, "hook_event_name", "event", "event_name", "hookName")
+        or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
+        or ""
+    )
+    if not is_session_start_hook(hook_event_name) or not skill_update_enabled(cfg):
+        return
+
+    notice = skill_update_notice_path(cfg)
+    if not notice.exists():
+        return
+    state_file = skill_update_state_path(cfg)
+    state = load_json(state_file)
+    if state.get("update_available") is not True:
+        return
+    now = time.time()
+    try:
+        last_notified = float(state.get("last_notified_epoch") or 0)
+    except (TypeError, ValueError):
+        last_notified = 0
+    if now - last_notified < skill_update_notify_interval_seconds(cfg):
+        return
+
+    try:
+        text = notice.read_text(encoding="utf-8").strip()
+    except Exception:
+        return
+    if not text:
+        return
+    print(text[:1000], file=sys.stderr)
+    state["last_notified_at"] = utc_now()
+    state["last_notified_epoch"] = now
+    try:
+        save_state(state_file, state)
+    except Exception:
+        return
+
+
+def maybe_spawn_skill_update_check(payload: dict[str, Any], cfg: dict[str, Any], config_path: Path) -> None:
+    hook_event_name = str(
+        value_at(payload, "hook_event_name", "event", "event_name", "hookName")
+        or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
+        or ""
+    )
+    if not is_session_start_hook(hook_event_name) or not skill_update_enabled(cfg):
+        return
+    script = Path(__file__).resolve().with_name("check_update.py")
+    if not script.exists():
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable or "python3", str(script), "--config", str(config_path), "--quiet"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record one Codex/Cursor hook event.")
     parser.add_argument("--surface", default="unknown", help="codex, cursor, or another source label")
@@ -1034,26 +1182,33 @@ def main() -> int:
     config_path = Path(args.config).expanduser()
     cfg = merged_config(config_path)
     payload = read_stdin_json()
+    maybe_emit_skill_update_notice(payload, cfg)
     event, snapshots = build_records(payload, cfg, args.surface, args.source_id)
     if event is None:
         return 0
     assign_event_sequence(event, cfg)
 
-    for snapshot in write_new_snapshots(snapshots, cfg):
-        ok, error = upload_event(snapshot, cfg)
-        if not ok:
-            spool_failed(snapshot, cfg, error)
-        else:
-            mark_remote_snapshot_known(snapshot, cfg)
+    snapshot_upload_candidates = write_new_snapshots(snapshots, cfg)
 
     local_log_dir = Path(str(cfg.get("local_log_dir") or DEFAULT_HOME / "events")).expanduser()
     append_jsonl(local_log_dir, event)
 
-    ok, error = upload_event(event, cfg)
-    if not ok:
-        spool_failed(event, cfg, error)
+    if upload_mode(cfg) == "sync":
+        for snapshot in snapshot_upload_candidates:
+            ok, error = upload_event(snapshot, cfg)
+            if not ok:
+                spool_failed(snapshot, cfg, error)
+            else:
+                mark_remote_snapshot_known(snapshot, cfg)
+
+        ok, error = upload_event(event, cfg)
+        if not ok:
+            spool_failed(event, cfg, error)
+    else:
+        maybe_spawn_async_upload(cfg, config_path)
 
     maybe_spawn_codex_backfill(payload, cfg, args.surface, config_path)
+    maybe_spawn_skill_update_check(payload, cfg, config_path)
     return 0
 
 

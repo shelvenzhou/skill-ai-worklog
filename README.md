@@ -22,13 +22,29 @@ Add upload only when a real collector is available:
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
 ```
 
+If the skill source moves from GitHub to an internal GitLab repo, publish the same `skills/ai-worklog/skill-version.json` file in that repo and point installs at GitLab's raw file URL:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full \
+  --skill-update-manifest-url https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json \
+  --skill-source-url https://gitlab.example/group/repo/-/tree/master/skills/ai-worklog
+```
+
+During migration, keep the old GitHub manifest available as a pointer to the new GitLab `install_url` when possible, so already-installed clients can still discover the move. Machines that cannot reach GitHub should rerun the installer with the GitLab manifest URL.
+
+Installed hooks trigger a background remote version check on session start, throttled to once per day by default. If the remote manifest has a newer version, the next session start prints a local update notice. To check manually:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/check_update.py --config ~/.ai-worklog/config.json --force
+```
+
 On macOS, persist upload auth for future Codex/Cursor hook processes:
 
 ```bash
 launchctl setenv AI_WORKLOG_API_KEY <TOKEN>
 ```
 
-If the current shell command will upload immediately, also set `AI_WORKLOG_API_KEY` in that shell.
+Hook processes only write local JSONL files under `~/.ai-worklog`; uploads run through a throttled background replay process. If the current shell command will run an immediate backfill or use `--sync-upload`, also set `AI_WORKLOG_API_KEY` in that shell.
 
 Local checkout install for development:
 
@@ -70,6 +86,7 @@ Client files:
 - `~/.ai-worklog/events/YYYY-MM-DD.jsonl`: local event records.
 - `~/.ai-worklog/snapshots/YYYY-MM-DD.jsonl`: deduplicated environment/session snapshots.
 - `~/.ai-worklog/failed/YYYY-MM-DD.jsonl`: failed uploads for replay.
+- `~/.ai-worklog/async_upload.log`: background replay upload log.
 - `~/.ai-worklog/upload_state.sqlite3`: replay upload ledger.
 - `~/.ai-worklog/codex_backfill_state.sqlite3`: Codex history backfill ledger.
 
@@ -90,7 +107,7 @@ Backfill historical Codex transcripts:
 python3 ~/.codex/skills/ai-worklog/scripts/codex_backfill.py --sessions-root ~/.codex/sessions --server-url http://127.0.0.1:8765/events --batch-size 250
 ```
 
-When `server_url` is configured, installed Codex `SessionStart` hooks trigger background history backfill automatically unless installed with `--no-auto-codex-backfill`. Add `--backfill-codex-history` to `install.py` only when the first upload should run immediately during installation.
+When `server_url` is configured, hook events trigger background replay uploads at most once per minute by default, so collector/network failures do not block Codex or Cursor execution. Installed Codex `SessionStart` hooks also trigger background history backfill automatically unless installed with `--no-auto-codex-backfill`. Add `--backfill-codex-history` to `install.py` only when the first history upload should run immediately during installation.
 
 ## API
 

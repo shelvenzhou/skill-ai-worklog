@@ -36,6 +36,22 @@ Company-internal install with upload:
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
 ```
 
+If the source moves from GitHub to an internal GitLab repo, keep publishing `skills/ai-worklog/skill-version.json` and configure the installed skill with GitLab URLs:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full \
+  --skill-update-manifest-url https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json \
+  --skill-source-url https://gitlab.example/group/repo/-/tree/master/skills/ai-worklog
+```
+
+The version check is provider-agnostic: it reads the raw JSON manifest and compares `version`. Installed hooks trigger a background check on session start, throttled to once per day by default, and print a local notice on a later session start when a newer remote version is found. Check manually when needed:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/check_update.py --config ~/.ai-worklog/config.json --force
+```
+
+During migration, keep the old GitHub manifest available as a pointer to the new GitLab `install_url` when possible, so already-installed clients can still discover the move. Machines that cannot reach GitHub should rerun the installer with the GitLab manifest URL.
+
 Only include `--server-url` when the user has provided a real collector endpoint or the internal endpoint is known. Without it, events still write locally under `~/.ai-worklog/events`.
 
 If upload auth is required on macOS, persist the token for future Codex/Cursor hook processes before restarting the apps:
@@ -44,9 +60,9 @@ If upload auth is required on macOS, persist the token for future Codex/Cursor h
 launchctl setenv AI_WORKLOG_API_KEY <TOKEN>
 ```
 
-If the current install or backfill command will upload immediately, also set `AI_WORKLOG_API_KEY` in that shell environment.
+Hook processes only write local JSONL files under `~/.ai-worklog`; uploads run through a throttled background replay process. If the current install command will run immediate backfill or use `--sync-upload`, also set `AI_WORKLOG_API_KEY` in that shell environment.
 
-With upload configured, Codex `SessionStart` hooks start a background historical backfill through `codex_backfill_trigger.py`. The trigger reads `~/.codex/sessions/**/rollout-*.jsonl`, uses a lock plus a default 24-hour throttle, caps each subprocess run at 30 minutes, logs to `~/.ai-worklog/codex_backfill.log`, and stores progress in `~/.ai-worklog/codex_backfill_state.sqlite3`.
+With upload configured, hooks trigger background replay through `async_upload_trigger.py` at most once per minute by default. Collector or network failures stay in the background; agent execution only waits for local writes. Codex `SessionStart` hooks also start a background historical backfill through `codex_backfill_trigger.py`. The backfill trigger reads `~/.codex/sessions/**/rollout-*.jsonl`, uses a lock plus a default 24-hour throttle, caps each subprocess run at 30 minutes, logs to `~/.ai-worklog/codex_backfill.log`, and stores progress in `~/.ai-worklog/codex_backfill_state.sqlite3`.
 
 Run historical backfill immediately during installation only if the user asks for it:
 
@@ -62,7 +78,7 @@ For local development from the repository checkout, use `python3 skills/ai-workl
 - Writes `~/.ai-worklog/config.json`.
 - Appends idempotent hook handlers into `$CODEX_HOME/hooks.json` and/or `~/.cursor/hooks.json`.
 - Enables Codex hooks in `$CODEX_HOME/config.toml` by setting `[features].hooks = true`.
-- Writes event, snapshot, failed-upload, replay, and Codex-backfill state under `~/.ai-worklog`.
+- Writes event, snapshot, failed-upload, async-upload, replay, Codex-backfill, and skill-update state under `~/.ai-worklog`.
 
 Hook commands are guarded: if `journal.py` has already been deleted, installed hooks no-op instead of failing. Still prefer `--uninstall` before deleting the skill so stale hook entries are removed.
 
@@ -132,6 +148,8 @@ Replay local backlog:
 python3 ~/.codex/skills/ai-worklog/scripts/replay.py --server-url <COLLECTOR_URL>/events --batch-size 100
 ```
 
+Installed hooks use background replay by default. Use `--sync-upload` only for local debugging when foreground upload behavior is explicitly needed.
+
 Backfill existing Codex sessions:
 
 ```bash
@@ -154,6 +172,12 @@ Upload preflight is enabled by default through `POST /events/exists`; disable it
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --no-upload-preflight
+```
+
+Disable background skill version checks only when the skill source is not reachable from the machine:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --no-skill-update-check
 ```
 
 ## Teammate Prompt

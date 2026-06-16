@@ -144,9 +144,18 @@ class InstallScriptTests(unittest.TestCase):
                 server_url="http://collector.example/events",
                 api_key_env="AI_WORKLOG_API_KEY",
                 timeout=2.0,
+                sync_upload=False,
                 no_upload_preflight=False,
                 max_transcript_bytes=1024,
                 hook_set="minimal",
+                async_upload_batch_size=100,
+                async_upload_trigger_interval_seconds=60,
+                async_upload_lock_stale_seconds=600,
+                async_upload_max_runtime_seconds=120,
+                no_skill_update_check=False,
+                skill_update_manifest_url="https://example.com/manifest.json",
+                skill_source_url="https://example.com/skill",
+                skill_update_trigger_interval_seconds=86400,
                 no_auto_codex_backfill=False,
                 backfill_batch_size=250,
                 backfill_trigger_interval_seconds=86400,
@@ -162,6 +171,28 @@ class InstallScriptTests(unittest.TestCase):
 
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(cfg["server_url"], "http://collector.example/events")
+            self.assertEqual(cfg["upload_mode"], "async")
+            self.assertEqual(
+                cfg["async_upload"],
+                {
+                    "enabled": True,
+                    "batch_size": 100,
+                    "trigger_interval_seconds": 60,
+                    "lock_stale_seconds": 600,
+                    "max_runtime_seconds": 120,
+                },
+            )
+            self.assertEqual(
+                cfg["skill_update"],
+                {
+                    "enabled": True,
+                    "name": "ai-worklog",
+                    "current_version": "0.3.0",
+                    "manifest_url": "https://example.com/manifest.json",
+                    "source_url": "https://example.com/skill",
+                    "trigger_interval_seconds": 86400,
+                },
+            )
             self.assertEqual(
                 cfg["codex_history_backfill"],
                 {

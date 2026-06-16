@@ -13,6 +13,7 @@ from io import StringIO
 from pathlib import Path
 
 import journal
+import async_upload_trigger
 import codex_backfill
 import codex_backfill_trigger
 import replay
@@ -308,6 +309,98 @@ class JournalTests(unittest.TestCase):
         cfg["request_timeout_seconds"] = -1
         self.assertEqual(journal.request_timeout_seconds(cfg), journal.DEFAULT_REQUEST_TIMEOUT_SECONDS)
 
+    def test_journal_main_async_upload_only_writes_local_files(self) -> None:
+        original_argv = sys.argv
+        original_stdin = sys.stdin
+        original_upload_event = journal.upload_event
+        original_spawn_async = journal.maybe_spawn_async_upload
+        calls = {"upload": 0, "spawn": 0}
+
+        def fail_upload(event: dict[str, object], cfg: dict[str, object]) -> tuple[bool, str | None]:
+            calls["upload"] += 1
+            raise AssertionError("hook should not upload synchronously")
+
+        def fake_spawn(cfg: dict[str, object], config_path: Path) -> None:
+            calls["spawn"] += 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "server_url": "http://collector.example/events",
+                        "local_log_dir": str(root / "events"),
+                        "snapshot_log_dir": str(root / "snapshots"),
+                        "state_path": str(root / "state.json"),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            sys.argv = ["journal.py", "--surface", "codex", "--config", str(config)]
+            sys.stdin = StringIO(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1"}))
+            journal.upload_event = fail_upload
+            journal.maybe_spawn_async_upload = fake_spawn
+            try:
+                rc = journal.main()
+            finally:
+                journal.upload_event = original_upload_event
+                journal.maybe_spawn_async_upload = original_spawn_async
+                sys.argv = original_argv
+                sys.stdin = original_stdin
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, {"upload": 0, "spawn": 1})
+            self.assertEqual(len(list((root / "events").glob("*.jsonl"))), 1)
+            self.assertEqual(len(list((root / "snapshots").glob("*.jsonl"))), 1)
+
+    def test_journal_main_sync_upload_preserves_direct_upload_mode(self) -> None:
+        original_argv = sys.argv
+        original_stdin = sys.stdin
+        original_upload_event = journal.upload_event
+        original_spawn_async = journal.maybe_spawn_async_upload
+        calls = {"upload": 0, "spawn": 0}
+
+        def fake_upload(event: dict[str, object], cfg: dict[str, object]) -> tuple[bool, str | None]:
+            calls["upload"] += 1
+            return True, None
+
+        def fake_spawn(cfg: dict[str, object], config_path: Path) -> None:
+            calls["spawn"] += 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "server_url": "http://collector.example/events",
+                        "upload_mode": "sync",
+                        "local_log_dir": str(root / "events"),
+                        "snapshot_log_dir": str(root / "snapshots"),
+                        "state_path": str(root / "state.json"),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            sys.argv = ["journal.py", "--surface", "codex", "--config", str(config)]
+            sys.stdin = StringIO(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1"}))
+            journal.upload_event = fake_upload
+            journal.maybe_spawn_async_upload = fake_spawn
+            try:
+                rc = journal.main()
+            finally:
+                journal.upload_event = original_upload_event
+                journal.maybe_spawn_async_upload = original_spawn_async
+                sys.argv = original_argv
+                sys.stdin = original_stdin
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls["upload"], 3)
+            self.assertEqual(calls["spawn"], 0)
+
     def test_stop_event_records_workspace_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -457,6 +550,44 @@ class ReplayTests(unittest.TestCase):
 
 
 class CodexBackfillTests(unittest.TestCase):
+    def test_async_upload_trigger_requires_async_mode_and_respects_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = journal.default_config()
+            cfg["server_url"] = "http://collector.example/events"
+            cfg["async_upload"] = {
+                "trigger_state_path": str(Path(tmp) / "async-trigger.json"),
+                "trigger_interval_seconds": 100,
+            }
+            self.assertTrue(async_upload_trigger.should_run(cfg, now=1000))
+
+            async_upload_trigger.mark_started(Path(cfg["async_upload"]["trigger_state_path"]))
+            self.assertFalse(async_upload_trigger.should_run(cfg, now=time.time()))
+
+            cfg["upload_mode"] = "sync"
+            self.assertFalse(async_upload_trigger.should_run(cfg, now=10000))
+
+    def test_async_upload_trigger_times_out_stuck_replay(self) -> None:
+        original_run = async_upload_trigger.subprocess.run
+
+        def fake_run(*args: object, **kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(cmd=kwargs.get("args") or "replay.py", timeout=1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = journal.default_config()
+            cfg["server_url"] = "http://collector.example/events"
+            cfg["async_upload"] = {
+                "log_path": str(Path(tmp) / "async.log"),
+                "max_runtime_seconds": 1,
+            }
+            try:
+                async_upload_trigger.subprocess.run = fake_run
+                rc = async_upload_trigger.run_upload(Path(tmp) / "config.json", cfg)
+            finally:
+                async_upload_trigger.subprocess.run = original_run
+
+            self.assertEqual(rc, 124)
+            self.assertIn("async upload timed out", (Path(tmp) / "async.log").read_text(encoding="utf-8"))
+
     def test_backfill_upload_records_uses_local_ledger_on_rerun(self) -> None:
         calls = {"preflight": 0, "upload": 0}
         original_existing = replay.existing_record_pks
@@ -524,6 +655,8 @@ class CodexBackfillTests(unittest.TestCase):
             root = Path(tmp)
             good = root / "rollout-2026-06-16T00-00-00-good.jsonl"
             bad = root / "rollout-2026-06-16T00-00-00-bad.jsonl"
+            config = root / "config.json"
+            config.write_text("{}\n", encoding="utf-8")
             good.write_text(
                 json.dumps({"type": "session_meta", "payload": {"id": "s1", "cwd": tmp}}) + "\n",
                 encoding="utf-8",
@@ -533,6 +666,8 @@ class CodexBackfillTests(unittest.TestCase):
                 "codex_backfill.py",
                 "--sessions-root",
                 str(root),
+                "--config",
+                str(config),
                 "--dry-run",
             ]
             try:
