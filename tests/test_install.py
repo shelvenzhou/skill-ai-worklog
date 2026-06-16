@@ -14,6 +14,9 @@ from pathlib import Path
 
 def load_installer():
     path = Path(__file__).resolve().parents[1] / "skills" / "ai-worklog" / "scripts" / "install.py"
+    scripts_dir = path.parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
     spec = importlib.util.spec_from_file_location("ai_worklog_install", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

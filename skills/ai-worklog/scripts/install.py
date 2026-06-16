@@ -12,9 +12,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import skill_release
 
-SKILL_NAME = "ai-worklog"
-SKILL_VERSION = "0.3.0"
+SKILL_NAME = skill_release.NAME
+SKILL_VERSION = skill_release.VERSION
 CONFIG_HOME = Path.home() / ".ai-worklog"
 CONFIG_PATH = CONFIG_HOME / "config.json"
 DEFAULT_BACKFILL_MAX_RUNTIME_SECONDS = 30 * 60
@@ -23,10 +24,13 @@ DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS = 2 * 60
 DEFAULT_SKILL_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_SKILL_UPDATE_MANIFEST_URL = (
-    "https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/"
-    "master/skills/ai-worklog/skill-version.json"
+    str(skill_release.MANIFEST.get("remote_manifest_url") or "")
+    or "https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/skill-version.json"
 )
-DEFAULT_SKILL_SOURCE_URL = "https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog"
+DEFAULT_SKILL_SOURCE_URL = (
+    str(skill_release.MANIFEST.get("install_url") or "")
+    or "https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog"
+)
 CODEX_MINIMAL_EVENTS = [
     "SessionStart",
     "UserPromptSubmit",

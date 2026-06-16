@@ -94,6 +94,12 @@ Hook commands are guarded: if `journal.py` has already been deleted, installed h
 - `minimal`: default. Codex uses `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `SubagentStop`, `Stop`. Cursor uses `sessionStart`, `beforeSubmitPrompt`, `postToolUse`, `postToolUseFailure`, `afterAgentResponse`, `subagentStop`, `stop`.
 - `full`: adds permission, pre-tool, compaction, file edit/read, shell/MCP, tab, session-end, and thought hooks. Use only for internal diagnostic runs where extra authorization prompts are acceptable.
 
+## Versioning
+
+`skills/ai-worklog/skill-version.json` is the source of truth for the installed skill release. Its `version` is the client skill version used in hook records and upload headers; `event_schema_version` is the data contract version and can change independently; `package_version` tracks the repository package version in `pyproject.toml`; `release_tag` is the Git tag expected for the published release.
+
+When publishing a new release, update `skill-version.json`, keep `pyproject.toml` and `uv.lock` in sync, publish the raw manifest at `remote_manifest_url`, then tag the commit with `release_tag`.
+
 ## Data Model
 
 Event records include normalized metadata for surface, hook event, session/turn, timeline, operation, tool, optional skill, content, usage, snapshot refs, and compact workspace diff when available. At `full`, `raw_hook_input` is also retained after common envelope keys are removed.

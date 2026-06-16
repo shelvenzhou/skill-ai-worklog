@@ -20,8 +20,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import skill_release
 
-VERSION = "0.3.0"
+VERSION = skill_release.VERSION
 DEFAULT_HOME = Path.home() / ".ai-worklog"
 DEFAULT_CONFIG_PATH = DEFAULT_HOME / "config.json"
 DEFAULT_MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024
@@ -114,7 +115,7 @@ CODE_FILENAMES = {
     "requirements.txt",
     "tsconfig.json",
 }
-EVENT_SCHEMA_VERSION = "0.3"
+EVENT_SCHEMA_VERSION = skill_release.EVENT_SCHEMA_VERSION
 
 
 def utc_now() -> str:

@@ -79,6 +79,17 @@ python3 -m server.ai_worklog_server --token-env AI_WORKLOG_SERVER_TOKEN
 
 Open `http://127.0.0.1:8765/ui` for the dashboard.
 
+## Versioning
+
+`skills/ai-worklog/skill-version.json` is the source of truth for the client skill release:
+
+- `version`: the installed skill/client release, also used by hook records and the `X-AI-Worklog-Version` upload header.
+- `release_tag`: the Git tag expected for that release, currently `ai-worklog-v0.3.0`.
+- `event_schema_version`: the record schema version; this can stay stable across skill releases.
+- `package_version`: the Python project package version, kept aligned with the skill release.
+
+When publishing a release, update `skill-version.json`, keep `pyproject.toml` and `uv.lock` in sync, publish the raw manifest at the configured `remote_manifest_url`, then tag the commit with `release_tag`.
+
 ## Data Flow
 
 Client files:
