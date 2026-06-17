@@ -227,8 +227,24 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
+def json_safe(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {json_safe(str(k)): json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def json_dumps(value: Any, **kwargs: Any) -> str:
+    return json.dumps(json_safe(value), **kwargs)
+
+
 def stable_hash(value: Any) -> str:
-    return sha256_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+    return sha256_text(json_dumps(value, ensure_ascii=False, sort_keys=True, default=str))
 
 
 def record_pk(record: dict[str, Any]) -> str:
@@ -937,7 +953,7 @@ def append_jsonl(directory: Path, event: dict[str, Any]) -> Path:
     day = dt.datetime.now().strftime("%Y-%m-%d")
     path = directory / f"{day}.jsonl"
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True, default=str))
+        fh.write(json_dumps(event, ensure_ascii=False, sort_keys=True, default=str))
         fh.write("\n")
     return path
 
@@ -962,7 +978,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json_dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def write_new_snapshots(snapshots: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1040,7 +1056,7 @@ def server_has_record(record: dict[str, Any], cfg: dict[str, Any]) -> bool:
     if not server_url:
         return False
     payload = {"record_pks": [record_pk(record)]}
-    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    data = json_dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     request = urllib.request.Request(
         preflight_url(str(server_url)),
         data=data,
@@ -1067,7 +1083,7 @@ def upload_event(event: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, str 
         return True, None
     if server_has_record(event, cfg):
         return True, None
-    data = json.dumps(event, ensure_ascii=False, default=str).encode("utf-8")
+    data = json_dumps(event, ensure_ascii=False, default=str).encode("utf-8")
     request = urllib.request.Request(str(server_url), data=data, headers=upload_headers(cfg), method="POST")
     try:
         with urllib.request.urlopen(
@@ -1129,14 +1145,20 @@ def maybe_spawn_codex_backfill(payload: dict[str, Any], cfg: dict[str, Any], sur
         or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
         or ""
     )
-    if surface != "codex" or hook_event_name != "SessionStart" or not auto_codex_backfill_enabled(cfg):
+    transcript_path = string_value(value_at(payload, "transcript_path", "transcriptPath"))
+    if surface != "codex" or not auto_codex_backfill_enabled(cfg):
+        return
+    if hook_event_name != "SessionStart" and not transcript_path:
         return
     script = Path(__file__).resolve().with_name("codex_backfill_trigger.py")
     if not script.exists():
         return
+    command = [sys.executable or "python3", str(script), "--config", str(config_path)]
+    if transcript_path:
+        command.extend(["--sessions-root", transcript_path, "--ignore-interval"])
     try:
         subprocess.Popen(
-            [sys.executable or "python3", str(script), "--config", str(config_path)],
+            command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

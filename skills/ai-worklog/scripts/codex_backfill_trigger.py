@@ -18,6 +18,7 @@ import journal
 DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
 DEFAULT_MAX_RUNTIME_SECONDS = 30 * 60
+DEFAULT_LOCK_WAIT_SECONDS = 30
 
 
 def backfill_config(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -92,25 +93,35 @@ def should_run(cfg: dict[str, Any], now: float | None = None) -> bool:
     return now - last_started >= interval_seconds(cfg)
 
 
-def acquire_lock(path: Path, stale_seconds: int) -> int | None:
+def lock_wait_seconds(cfg: dict[str, Any]) -> int:
+    value = backfill_config(cfg).get("lock_wait_seconds")
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_LOCK_WAIT_SECONDS
+
+
+def acquire_lock(path: Path, stale_seconds: int, wait_seconds: int = 0) -> int | None:
+    deadline = time.time() + max(0, wait_seconds)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
+    while True:
         try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            age = 0
-        if age < stale_seconds:
-            return None
-        try:
-            path.unlink()
-        except OSError:
-            return None
-    try:
-        return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return None
+            return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                age = 0
+            if age >= stale_seconds:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                else:
+                    continue
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.5)
 
 
 def mark_started(path: Path) -> None:
@@ -122,7 +133,7 @@ def mark_started(path: Path) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run_backfill(config_path: Path, cfg: dict[str, Any]) -> int:
+def run_backfill(config_path: Path, cfg: dict[str, Any], sessions_root: str | None = None) -> int:
     section = backfill_config(cfg)
     script = Path(__file__).resolve().with_name("codex_backfill.py")
     command = [
@@ -133,6 +144,8 @@ def run_backfill(config_path: Path, cfg: dict[str, Any]) -> int:
         "--batch-size",
         str(section.get("batch_size") or 250),
     ]
+    if sessions_root:
+        command.extend(["--sessions-root", str(Path(sessions_root).expanduser())])
     if section.get("limit") is not None:
         command.extend(["--limit", str(section["limit"])])
     if section.get("upload_state"):
@@ -161,22 +174,24 @@ def run_backfill(config_path: Path, cfg: dict[str, Any]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Trigger Codex history backfill in the background.")
     parser.add_argument("--config", default=os.environ.get("AI_WORKLOG_CONFIG") or str(journal.DEFAULT_CONFIG_PATH))
+    parser.add_argument("--sessions-root", help="Transcript file or sessions root to backfill.")
+    parser.add_argument("--ignore-interval", action="store_true", help="Run even when the periodic trigger interval has not elapsed.")
     args = parser.parse_args()
 
     config_path = Path(args.config).expanduser()
     cfg = journal.merged_config(config_path)
-    if not should_run(cfg):
+    if not args.ignore_interval and not should_run(cfg):
         return 0
 
     lock = lock_path(cfg)
-    fd = acquire_lock(lock, lock_stale_seconds(cfg))
+    fd = acquire_lock(lock, lock_stale_seconds(cfg), lock_wait_seconds(cfg))
     if fd is None:
         return 0
     try:
         os.write(fd, f"pid={os.getpid()} started={journal.utc_now()}\n".encode("utf-8"))
         os.close(fd)
         mark_started(state_path(cfg))
-        return run_backfill(config_path, cfg)
+        return run_backfill(config_path, cfg, args.sessions_root)
     finally:
         try:
             lock.unlink()

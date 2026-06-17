@@ -19,9 +19,11 @@ SKILL_VERSION = skill_release.VERSION
 CONFIG_HOME = Path.home() / ".ai-worklog"
 CONFIG_PATH = CONFIG_HOME / "config.json"
 DEFAULT_BACKFILL_MAX_RUNTIME_SECONDS = 30 * 60
+DEFAULT_BACKFILL_LOCK_WAIT_SECONDS = 30
 DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS = 60
 DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS = 2 * 60
+DEFAULT_ASYNC_UPLOAD_LOCK_WAIT_SECONDS = 30
 DEFAULT_SKILL_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_SKILL_UPDATE_MANIFEST_URL = (
     str(skill_release.MANIFEST.get("remote_manifest_url") or "")
@@ -331,6 +333,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
         "batch_size": args.backfill_batch_size,
         "trigger_interval_seconds": args.backfill_trigger_interval_seconds,
         "lock_stale_seconds": args.backfill_lock_stale_seconds,
+        "lock_wait_seconds": args.backfill_lock_wait_seconds,
         "max_runtime_seconds": args.backfill_max_runtime_seconds,
     }
     cfg["async_upload"] = {
@@ -338,6 +341,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
         "batch_size": args.async_upload_batch_size,
         "trigger_interval_seconds": args.async_upload_trigger_interval_seconds,
         "lock_stale_seconds": args.async_upload_lock_stale_seconds,
+        "lock_wait_seconds": args.async_upload_lock_wait_seconds,
         "max_runtime_seconds": args.async_upload_max_runtime_seconds,
     }
     cfg["skill_update"] = {
@@ -533,6 +537,7 @@ def main() -> int:
     parser.add_argument("--async-upload-batch-size", type=int, default=100, help="Records per background replay upload batch.")
     parser.add_argument("--async-upload-trigger-interval-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS, help="Minimum seconds between background upload trigger attempts.")
     parser.add_argument("--async-upload-lock-stale-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS, help="Seconds before a background upload lock is considered stale.")
+    parser.add_argument("--async-upload-lock-wait-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_LOCK_WAIT_SECONDS, help="Seconds a background upload trigger may wait for an active upload lock.")
     parser.add_argument("--async-upload-max-runtime-seconds", type=int, default=DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS, help="Maximum seconds a background upload replay subprocess may run.")
     parser.add_argument("--backfill-codex-history", action="store_true", help="After installing Codex hooks, upload historical ~/.codex/sessions transcripts.")
     parser.add_argument("--backfill-batch-size", type=int, default=250, help="Records per historical backfill preflight/upload request.")
@@ -541,6 +546,7 @@ def main() -> int:
     parser.add_argument("--no-auto-codex-backfill", action="store_true", help="Disable automatic background Codex history backfill from SessionStart hooks.")
     parser.add_argument("--backfill-trigger-interval-seconds", type=int, default=24 * 60 * 60, help="Minimum seconds between automatic Codex history backfill trigger attempts.")
     parser.add_argument("--backfill-lock-stale-seconds", type=int, default=6 * 60 * 60, help="Seconds before an automatic backfill lock is considered stale.")
+    parser.add_argument("--backfill-lock-wait-seconds", type=int, default=DEFAULT_BACKFILL_LOCK_WAIT_SECONDS, help="Seconds an automatic backfill trigger may wait for an active backfill lock.")
     parser.add_argument(
         "--backfill-max-runtime-seconds",
         type=int,

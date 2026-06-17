@@ -397,6 +397,20 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(len(list((root / "events").glob("*.jsonl"))), 1)
             self.assertEqual(len(list((root / "snapshots").glob("*.jsonl"))), 1)
 
+    def test_append_jsonl_replaces_invalid_surrogates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = journal.append_jsonl(
+                Path(tmp),
+                {
+                    "record_type": "event",
+                    "event_id": "bad-surrogate",
+                    "content": {"tool_response": "bad\udcaevalue"},
+                },
+            )
+
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["content"]["tool_response"], "bad?value")
+
     def test_journal_main_sync_upload_preserves_direct_upload_mode(self) -> None:
         original_argv = sys.argv
         original_stdin = sys.stdin
@@ -594,16 +608,26 @@ class ReplayTests(unittest.TestCase):
 class CodexBackfillTests(unittest.TestCase):
     def test_async_upload_trigger_requires_async_mode_and_respects_interval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
             cfg = journal.default_config()
             cfg["server_url"] = "http://collector.example/events"
             cfg["async_upload"] = {
-                "trigger_state_path": str(Path(tmp) / "async-trigger.json"),
+                "trigger_state_path": str(root / "async-trigger.json"),
                 "trigger_interval_seconds": 100,
             }
+            cfg["local_log_dir"] = str(root / "events")
             self.assertTrue(async_upload_trigger.should_run(cfg, now=1000))
 
             async_upload_trigger.mark_started(Path(cfg["async_upload"]["trigger_state_path"]))
             self.assertFalse(async_upload_trigger.should_run(cfg, now=time.time()))
+
+            event_dir = root / "events"
+            event_dir.mkdir()
+            event_file = event_dir / "2026-06-17.jsonl"
+            event_file.write_text('{"record_type":"event","event_id":"e1"}\n', encoding="utf-8")
+            future = time.time() + 5
+            os.utime(event_file, (future, future))
+            self.assertTrue(async_upload_trigger.should_run(cfg, now=time.time()))
 
             cfg["upload_mode"] = "sync"
             self.assertFalse(async_upload_trigger.should_run(cfg, now=10000))
@@ -762,6 +786,35 @@ class CodexBackfillTests(unittest.TestCase):
 
             self.assertEqual(rc, 124)
             self.assertIn("backfill timed out", (Path(tmp) / "backfill.log").read_text(encoding="utf-8"))
+
+    def test_backfill_trigger_accepts_specific_sessions_root(self) -> None:
+        calls: list[list[str]] = []
+        original_run = codex_backfill_trigger.subprocess.run
+
+        class Completed:
+            returncode = 0
+
+        def fake_run(command: list[str], **kwargs: object) -> object:
+            calls.append(command)
+            return Completed()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = journal.default_config()
+            cfg["server_url"] = "http://collector.example/events"
+            cfg["codex_history_backfill"] = {
+                "log_path": str(Path(tmp) / "backfill.log"),
+            }
+            transcript = Path(tmp) / "rollout-test.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            try:
+                codex_backfill_trigger.subprocess.run = fake_run
+                rc = codex_backfill_trigger.run_backfill(Path(tmp) / "config.json", cfg, str(transcript))
+            finally:
+                codex_backfill_trigger.subprocess.run = original_run
+
+            self.assertEqual(rc, 0)
+            self.assertIn("--sessions-root", calls[0])
+            self.assertIn(str(transcript), calls[0])
 
 
 if __name__ == "__main__":

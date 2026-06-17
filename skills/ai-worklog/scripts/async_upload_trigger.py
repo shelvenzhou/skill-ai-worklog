@@ -14,6 +14,8 @@ from typing import Any
 
 import journal
 
+DEFAULT_LOCK_WAIT_SECONDS = 30
+
 
 def upload_config(cfg: dict[str, Any]) -> dict[str, Any]:
     value = cfg.get("async_upload")
@@ -72,6 +74,14 @@ def max_runtime_seconds(cfg: dict[str, Any]) -> int:
         return journal.DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS
 
 
+def lock_wait_seconds(cfg: dict[str, Any]) -> int:
+    value = upload_config(cfg).get("lock_wait_seconds")
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_LOCK_WAIT_SECONDS
+
+
 def batch_size(cfg: dict[str, Any]) -> int:
     value = upload_config(cfg).get("batch_size")
     try:
@@ -87,6 +97,27 @@ def upload_state_path(cfg: dict[str, Any]) -> Path | None:
     return None
 
 
+def spool_directories(cfg: dict[str, Any]) -> list[Path]:
+    return [
+        Path(str(cfg.get("snapshot_log_dir") or journal.DEFAULT_HOME / "snapshots")).expanduser(),
+        Path(str(cfg.get("local_log_dir") or journal.DEFAULT_HOME / "events")).expanduser(),
+        Path(str(cfg.get("failed_log_dir") or journal.DEFAULT_HOME / "failed")).expanduser(),
+    ]
+
+
+def latest_spool_mtime(cfg: dict[str, Any]) -> float:
+    latest = 0.0
+    for directory in spool_directories(cfg):
+        if not directory.exists():
+            continue
+        for path in directory.glob("*.jsonl"):
+            try:
+                latest = max(latest, path.stat().st_mtime)
+            except OSError:
+                continue
+    return latest
+
+
 def should_run(cfg: dict[str, Any], now: float | None = None) -> bool:
     if not enabled(cfg):
         return False
@@ -99,28 +130,33 @@ def should_run(cfg: dict[str, Any], now: float | None = None) -> bool:
         last_started = float(data.get("last_started_epoch") or 0)
     except Exception:
         last_started = path.stat().st_mtime
+    if latest_spool_mtime(cfg) > last_started:
+        return True
     return now - last_started >= interval_seconds(cfg)
 
 
-def acquire_lock(path: Path, stale_seconds: int) -> int | None:
+def acquire_lock(path: Path, stale_seconds: int, wait_seconds: int = 0) -> int | None:
+    deadline = time.time() + max(0, wait_seconds)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
+    while True:
         try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            age = 0
-        if age < stale_seconds:
-            return None
-        try:
-            path.unlink()
-        except OSError:
-            return None
-    try:
-        return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return None
+            return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                age = 0
+            if age >= stale_seconds:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                else:
+                    continue
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.5)
+            continue
 
 
 def mark_started(path: Path) -> None:
@@ -177,7 +213,7 @@ def main() -> int:
         return 0
 
     lock = lock_path(cfg)
-    fd = acquire_lock(lock, lock_stale_seconds(cfg))
+    fd = acquire_lock(lock, lock_stale_seconds(cfg), lock_wait_seconds(cfg))
     if fd is None:
         return 0
     try:
