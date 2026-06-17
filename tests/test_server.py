@@ -511,6 +511,38 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["event_count"], 5)
         self.assertEqual(detail["returned_events"], 2)
 
+    def test_session_detail_adds_display_fields_for_tool_results_and_mojibake(self) -> None:
+        events = [
+            {
+                "record_type": "event",
+                "event_id": "prompt",
+                "received_at": "2026-06-16T01:00:00Z",
+                "session_id": "s1",
+                "hook_event_name": "UserPromptSubmit",
+                "content": {"prompt": "濂斤紝鎸変綘鐨勬帹鑽愬疄鐜癨n"},
+            },
+            {
+                "record_type": "event",
+                "event_id": "tool",
+                "received_at": "2026-06-16T01:00:01Z",
+                "session_id": "s1",
+                "hook_event_name": "PostToolUse",
+                "operation": {"category": "tool", "phase": "after"},
+                "tool": {"name": "Bash"},
+                "content": {
+                    "tool_input": {"command": "lark-cli approval instances get --help"},
+                    "tool_response": "鑾峰彇鍗曚釜瀹℃壒瀹炰緥璇︽儏",
+                },
+            },
+        ]
+
+        detail = build_session_detail("s1", events, [])
+
+        self.assertEqual(detail["events"][0]["content"]["prompt"], "濂斤紝鎸変綘鐨勬帹鑽愬疄鐜癨n")
+        self.assertEqual(detail["events"][0]["display"]["prompt"], "好，按你的推荐实现\\n")
+        self.assertEqual(detail["events"][1]["display"]["tool_input"], {"command": "lark-cli approval instances get --help"})
+        self.assertEqual(detail["events"][1]["display"]["tool_response"], "获取单个审批实例详情")
+
     def test_session_detail_includes_transcript_agent_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             transcript = Path(tmp) / "rollout.jsonl"

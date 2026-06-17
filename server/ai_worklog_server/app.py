@@ -284,8 +284,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     .event.response { border-left: 3px solid #5468b2; }
     .event.session { border-left: 3px solid var(--soft); }
     .event.fail { border-left-color: var(--bad); }
+    .blocks { display: grid; gap: 8px; margin-top: 8px; }
+    .block-label {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
     pre {
-      margin: 8px 0 0;
+      margin: 0;
       background: #f0f0eb;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -532,13 +540,41 @@ DASHBOARD_HTML = r"""<!doctype html>
         configItem("uncommitted", `${codeMetrics.uncommitted_code?.additions || 0}+ / ${codeMetrics.uncommitted_code?.files || 0} files`),
       );
     }
-    function eventText(record) {
+    function eventBlocks(record) {
+      const display = record.display || {};
       const content = record.content || {};
       const tool = record.tool || {};
       const raw = record.raw_hook_input || {};
       const isSessionStop = record.operation?.category === "session" && record.operation?.phase === "stop";
-      const response = isSessionStop ? "" : content.response;
-      return tool.command || content.prompt || response || content.tool_input?.command || raw.tool_name || record.hook_event_name || "";
+      const blocks = [];
+      const seen = new Set();
+      function add(label, value) {
+        if (value == null || value === "") return;
+        const key = `${label}:${typeof value === "string" ? value : JSON.stringify(value)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        blocks.push({ label, value });
+      }
+      add("prompt", display.prompt ?? content.prompt ?? raw.prompt);
+      if (!isSessionStop) add("response", display.response ?? content.response);
+      add("thought", display.thought ?? content.thought);
+      add("tool input", display.tool_input ?? content.tool_input ?? tool.command ?? raw.tool_input ?? raw.input);
+      add("tool result", display.tool_response ?? content.tool_response ?? raw.tool_response ?? raw.output ?? raw.result);
+      if (!blocks.length) add("summary", tool.command || content.tool_input?.command || raw.tool_name || record.hook_event_name);
+      return blocks;
+    }
+    function renderBlocks(blocks) {
+      const root = document.createElement("div");
+      root.className = "blocks";
+      root.replaceChildren(...blocks.map((block) => {
+        const el = document.createElement("div");
+        const label = document.createElement("div");
+        label.className = "block-label";
+        label.textContent = block.label;
+        el.append(label, jsonBlock(block.value));
+        return el;
+      }));
+      return root;
     }
     function renderTimeline(events) {
       const root = $("timeline");
@@ -566,9 +602,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         row.append(pill(category));
         if (record.tool?.name) row.append(pill(record.tool.name));
         if (success === false) row.append(pill("failed"));
-        const primary = eventText(record);
+        const blocks = eventBlocks(record);
         el.append(title, row);
-        if (primary) el.append(jsonBlock(primary));
+        if (blocks.length) el.append(renderBlocks(blocks));
         const details = document.createElement("details");
         const summary = document.createElement("summary");
         summary.className = "label";

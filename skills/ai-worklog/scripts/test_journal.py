@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import journal
@@ -20,6 +20,21 @@ import replay
 
 
 class JournalTests(unittest.TestCase):
+    def test_read_stdin_json_decodes_utf8_bytes_independent_of_locale(self) -> None:
+        class BinaryStdin:
+            def __init__(self, data: bytes) -> None:
+                self.buffer = BytesIO(data)
+
+            def read(self) -> str:
+                raise AssertionError("text stdin should not be used when buffer is available")
+
+        original_stdin = sys.stdin
+        try:
+            sys.stdin = BinaryStdin(json.dumps({"prompt": "好，按你的推荐实现"}, ensure_ascii=False).encode("utf-8"))  # type: ignore[assignment]
+            self.assertEqual(journal.read_stdin_json()["prompt"], "好，按你的推荐实现")
+        finally:
+            sys.stdin = original_stdin
+
     def test_codex_backfill_builds_stable_records_from_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout-2026-06-16T00-00-00-s1.jsonl"

@@ -10,6 +10,39 @@ from .metrics import compute_code_metrics
 from .storage import session_models, token_totals, token_totals_by_model
 
 
+MOJIBAKE_MARKERS = (
+    "锟斤拷",
+    "濂",
+    "紝",
+    "鎸",
+    "変",
+    "綘",
+    "鐨",
+    "勬",
+    "帹",
+    "鑽",
+    "愬",
+    "疄",
+    "鐜",
+    "鑾",
+    "彇",
+    "鍗",
+    "曚",
+    "釜",
+    "瀹",
+    "壒",
+    "炰",
+    "緥",
+    "璇",
+    "儏",
+    "涓",
+    "轰",
+    "鍙",
+    "傛",
+    "佺",
+)
+
+
 def record_time(record: dict[str, Any]) -> str:
     return str(record.get("received_at") or record.get("client_received_at") or record.get("_server_ingested_at") or "")
 
@@ -22,6 +55,64 @@ def session_key(record: dict[str, Any]) -> str:
 def nested_dict(record: dict[str, Any], key: str) -> dict[str, Any]:
     value = record.get(key)
     return value if isinstance(value, dict) else {}
+
+
+def mojibake_score(value: str) -> int:
+    return value.count("\ufffd") * 3 + sum(value.count(marker) for marker in MOJIBAKE_MARKERS)
+
+
+def repair_mojibake_text(value: str) -> str:
+    if not value or value.isascii():
+        return value
+    score = mojibake_score(value)
+    if score < 2:
+        return value
+    try:
+        repaired = value.encode("gb18030").decode("utf-8")
+    except UnicodeError:
+        return value
+    if repaired == value:
+        return value
+    if mojibake_score(repaired) < score:
+        return repaired
+    return value
+
+
+def repair_mojibake_tree(value: Any) -> Any:
+    if isinstance(value, str):
+        return repair_mojibake_text(value)
+    if isinstance(value, list):
+        return [repair_mojibake_tree(item) for item in value]
+    if isinstance(value, dict):
+        return {key: repair_mojibake_tree(item) for key, item in value.items()}
+    return value
+
+
+def first_value(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def display_fields(record: dict[str, Any]) -> dict[str, Any]:
+    content = nested_dict(record, "content")
+    raw = nested_dict(record, "raw_hook_input")
+    fields = {
+        "prompt": first_value(content.get("prompt"), raw.get("prompt"), raw.get("user_prompt"), raw.get("message")),
+        "response": first_value(content.get("response"), raw.get("last_assistant_message"), raw.get("agent_response")),
+        "thought": first_value(content.get("thought"), raw.get("thought"), raw.get("agent_thought")),
+        "tool_input": first_value(content.get("tool_input"), raw.get("tool_input"), raw.get("input"), raw.get("arguments")),
+        "tool_response": first_value(content.get("tool_response"), raw.get("tool_response"), raw.get("output"), raw.get("result")),
+    }
+    return {key: repair_mojibake_tree(value) for key, value in fields.items() if value is not None}
+
+
+def record_with_display(record: dict[str, Any]) -> dict[str, Any]:
+    fields = display_fields(record)
+    if not fields:
+        return record
+    return {**record, "display": fields}
 
 
 def operation_category(record: dict[str, Any]) -> str:
@@ -444,12 +535,15 @@ def build_session_detail(
     bounded_limit = max(1, min(int(limit), 1000))
     assistant_messages = transcript_agent_messages(session_id, snapshot_records)
     visible_events = ordered[-bounded_limit:]
-    combined_timeline_records = sorted([*visible_events, *transcript_tool_events, *assistant_messages], key=record_time)
+    display_events = [record_with_display(record) for record in visible_events]
+    display_transcript_tool_events = [record_with_display(record) for record in transcript_tool_events]
+    display_assistant_messages = [record_with_display(record) for record in assistant_messages]
+    combined_timeline_records = sorted([*display_events, *display_transcript_tool_events, *display_assistant_messages], key=record_time)
     return {
         "session": summary,
-        "events": visible_events,
-        "assistant_messages": assistant_messages,
-        "transcript_tool_events": transcript_tool_events,
+        "events": display_events,
+        "assistant_messages": display_assistant_messages,
+        "transcript_tool_events": display_transcript_tool_events,
         "timeline": [timeline_event(record) for record in combined_timeline_records],
         "event_count": len(ordered),
         "returned_events": min(len(ordered), bounded_limit),

@@ -203,8 +203,17 @@ def upload_mode(cfg: dict[str, Any]) -> str:
     return value if value in {"async", "sync", "local"} else "async"
 
 
+def read_stdin_text() -> str:
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        data = buffer.read()
+        if isinstance(data, bytes):
+            return data.decode("utf-8", errors="replace")
+    return sys.stdin.read()
+
+
 def read_stdin_json() -> dict[str, Any]:
-    raw = sys.stdin.read()
+    raw = read_stdin_text()
     if not raw.strip():
         return {}
     try:
