@@ -693,6 +693,20 @@ class WorklogHandler(BaseHTTPRequestHandler):
             write_json(self, HTTPStatus.OK, compute_code_metrics(records))
             return
 
+        if parsed.path == "/metrics/tokens":
+            query = parse_qs(parsed.query)
+            try:
+                payload = self.store.token_report((query.get("month") or [None])[0])
+            except ValueError as exc:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            write_json(self, HTTPStatus.OK, payload)
+            return
+
+        if parsed.path == "/identity/mappings":
+            write_json(self, HTTPStatus.OK, {"mappings": self.store.identity_mappings()})
+            return
+
         if parsed.path == "/sessions":
             query = parse_qs(parsed.query)
             limit = int((query.get("limit") or ["50"])[0])
@@ -789,6 +803,29 @@ class WorklogHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/identity/mappings":
+            if not self.ui_authorized():
+                write_json(self, HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(body) if body.strip() else {}
+                if not isinstance(payload, dict):
+                    raise ValueError("request body must be a JSON object")
+                mapping = self.store.upsert_identity_mapping(
+                    identity_kind=str(payload.get("identity_kind") or payload.get("kind") or ""),
+                    identity_value=str(payload.get("identity_value") or payload.get("value") or ""),
+                    user_email=str(payload.get("user_email") or ""),
+                    display_name=payload.get("display_name") if isinstance(payload.get("display_name"), str) else None,
+                    source=str(payload.get("source") or "manual"),
+                )
+            except Exception as exc:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            write_json(self, HTTPStatus.OK, {"mapping": mapping})
+            return
+
         if parsed.path not in {"/events", "/events/exists"}:
             write_json(self, HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -824,6 +861,21 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
         result = self.store.insert_many(records)
         write_json(self, HTTPStatus.ACCEPTED, result)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if not self.ui_authorized():
+            write_json(self, HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
+        if parsed.path != "/identity/mappings":
+            write_json(self, HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+        query = parse_qs(parsed.query)
+        deleted = self.store.delete_identity_mapping(
+            identity_kind=(query.get("identity_kind") or query.get("kind") or [""])[0],
+            identity_value=(query.get("identity_value") or query.get("value") or [""])[0],
+        )
+        write_json(self, HTTPStatus.OK, {"deleted": deleted})
 
     def upload_authorized(self) -> bool:
         if not self.upload_token:

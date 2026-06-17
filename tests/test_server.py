@@ -170,6 +170,73 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(by_model["gpt-a"]["cached_input_tokens"], 4)
             self.assertEqual(by_model["gpt-b"]["total_tokens"], 5)
 
+    def test_token_report_resolves_git_email_and_manual_hostname_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            store.insert_many(
+                [
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "env1",
+                        "snapshot_type": "environment",
+                        "environment": {
+                            "hostname": "DEVBOX-A",
+                            "user": "user",
+                            "identity": {"git_user_email": "DevA@Example.com", "hostname": "DEVBOX-A", "os_user": "user"},
+                        },
+                    },
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "sess1",
+                        "snapshot_type": "session",
+                        "environment_ref": "env1",
+                        "session": {"session_id": "s1", "user_email": None, "model": "gpt-test"},
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "e1",
+                        "session_id": "s1",
+                        "environment_ref": "env1",
+                        "session_ref": "sess1",
+                        "model": "gpt-test",
+                        "usage": {"timestamp": "turn1", "info": {"last_token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}},
+                    },
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "env2",
+                        "snapshot_type": "environment",
+                        "environment": {"hostname": "DEVBOX-B", "user": "user", "identity": {"hostname": "DEVBOX-B", "os_user": "user"}},
+                    },
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "sess2",
+                        "snapshot_type": "session",
+                        "environment_ref": "env2",
+                        "session": {"session_id": "s2", "user_email": None, "model": "gpt-test"},
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "e2",
+                        "session_id": "s2",
+                        "environment_ref": "env2",
+                        "session_ref": "sess2",
+                        "model": "gpt-test",
+                        "usage": {"timestamp": "turn2", "info": {"last_token_usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}},
+                    },
+                ]
+            )
+
+            report = store.token_report()
+            self.assertEqual(report["token_totals"]["total_tokens"], 20)
+            self.assertEqual(report["users"][0]["user_email"], "deva@example.com")
+            self.assertEqual(report["users"][0]["token_totals"]["total_tokens"], 15)
+            self.assertEqual(report["unclaimed"][0]["identity_key"], "hostname:devbox-b")
+
+            store.upsert_identity_mapping(identity_kind="hostname", identity_value="DEVBOX-B", user_email="devb@example.com")
+            claimed = store.token_report()
+            self.assertEqual({item["user_email"] for item in claimed["users"]}, {"deva@example.com", "devb@example.com"})
+            self.assertEqual(claimed["unclaimed"], [])
+
     def test_queries_events_and_snapshots_for_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = WorklogStore(Path(tmp))
@@ -622,6 +689,68 @@ class SessionAnalysisTests(unittest.TestCase):
 
 
 class AppEndpointTests(unittest.TestCase):
+    def test_identity_mapping_and_token_metric_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = build_server("127.0.0.1", 0, Path(tmp), None)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                records = [
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "env1",
+                        "snapshot_type": "environment",
+                        "environment": {"hostname": "DEVBOX-C", "user": "user", "identity": {"hostname": "DEVBOX-C", "os_user": "user"}},
+                    },
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "sess1",
+                        "snapshot_type": "session",
+                        "environment_ref": "env1",
+                        "session": {"session_id": "s1", "model": "gpt-test"},
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "e1",
+                        "session_id": "s1",
+                        "environment_ref": "env1",
+                        "session_ref": "sess1",
+                        "model": "gpt-test",
+                        "usage": {"timestamp": "turn1", "info": {"last_token_usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}}},
+                    },
+                ]
+                event_request = urllib.request.Request(
+                    f"{base_url}/events",
+                    data=json.dumps(records).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(event_request, timeout=5) as response:
+                    self.assertEqual(response.status, 202)
+
+                with urllib.request.urlopen(f"{base_url}/metrics/tokens", timeout=5) as response:
+                    report = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(report["unclaimed"][0]["identity_key"], "hostname:devbox-c")
+
+                mapping_request = urllib.request.Request(
+                    f"{base_url}/identity/mappings",
+                    data=json.dumps({"identity_kind": "hostname", "identity_value": "DEVBOX-C", "user_email": "devc@example.com"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(mapping_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+
+                with urllib.request.urlopen(f"{base_url}/metrics/tokens", timeout=5) as response:
+                    claimed = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(claimed["users"][0]["user_email"], "devc@example.com")
+                self.assertEqual(claimed["users"][0]["token_totals"]["total_tokens"], 5)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_upload_and_ui_tokens_are_separate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = build_server("127.0.0.1", 0, Path(tmp), "upload-secret", "ui-secret")

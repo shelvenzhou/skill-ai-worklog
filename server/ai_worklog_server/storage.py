@@ -50,6 +50,17 @@ create index if not exists idx_records_hook on records(hook_event_name);
 create index if not exists idx_records_type_ingested on records(record_type, ingested_at);
 create index if not exists idx_records_session_type_ingested on records(session_id, record_type, ingested_at);
 create index if not exists idx_records_surface_type_ingested on records(surface, record_type, ingested_at);
+
+create table if not exists identity_mappings (
+  identity_kind text not null,
+  identity_value text not null,
+  user_email text not null,
+  display_name text,
+  source text,
+  created_at text not null,
+  updated_at text not null,
+  primary key (identity_kind, identity_value)
+);
 """
 
 OPTIONAL_COLUMNS = {
@@ -69,6 +80,38 @@ def stable_hash(value: Any) -> str:
 
 def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def normalize_identity_kind(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
+def normalize_identity_value(kind: str, value: str) -> str:
+    value = value.strip()
+    if kind in {"email", "git_email", "user_email", "windows_upn", "hostname", "os_user", "os_user_host", "user_domain"}:
+        return value.lower()
+    return value
+
+
+def month_bounds(month: str | None) -> tuple[str, str, str]:
+    if month:
+        try:
+            start_date = dt.datetime.strptime(month, "%Y-%m").replace(tzinfo=dt.timezone.utc)
+        except ValueError as exc:
+            raise ValueError("month must use YYYY-MM") from exc
+    else:
+        now = dt.datetime.now(dt.timezone.utc)
+        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start_date.month == 12:
+        end_date = start_date.replace(year=start_date.year + 1, month=1)
+    else:
+        end_date = start_date.replace(month=start_date.month + 1)
+    label = start_date.strftime("%Y-%m")
+    return (
+        label,
+        start_date.isoformat().replace("+00:00", "Z"),
+        end_date.isoformat().replace("+00:00", "Z"),
+    )
 
 
 def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
@@ -193,6 +236,15 @@ def token_totals_by_model(
     return dict(sorted(totals_by_model.items()))
 
 
+def empty_token_totals() -> dict[str, int]:
+    return {key: 0 for key in TOKEN_TOTAL_KEYS}
+
+
+def add_token_totals(target: dict[str, int], row: sqlite3.Row | dict[str, Any]) -> None:
+    for key in TOKEN_TOTAL_KEYS:
+        target[key] = int(target.get(key) or 0) + int(row[key] or 0)
+
+
 def record_pk(record: dict[str, Any]) -> str:
     event_id = record.get("event_id")
     if event_id:
@@ -201,6 +253,59 @@ def record_pk(record: dict[str, Any]) -> str:
     if snapshot_id:
         return f"snapshot:{snapshot_id}"
     return f"hash:{stable_hash(record)}"
+
+
+def string_value(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def nested(record: dict[str, Any], key: str) -> dict[str, Any]:
+    value = record.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def identity_candidates(record: dict[str, Any], session: dict[str, Any], environment: dict[str, Any]) -> list[dict[str, str]]:
+    env_identity = nested(environment, "identity")
+    git = nested(environment, "git")
+    hostname = string_value(environment.get("hostname")) or string_value(env_identity.get("hostname"))
+    os_user = string_value(environment.get("user")) or string_value(env_identity.get("os_user"))
+    user_domain = string_value(environment.get("user_domain")) or string_value(env_identity.get("user_domain"))
+
+    raw_candidates = [
+        ("user_email", session.get("user_email"), "session"),
+        ("user_email", record.get("user_email"), "event"),
+        ("user_email", env_identity.get("user_email"), "environment"),
+        ("git_email", env_identity.get("git_user_email") or git.get("user_email"), "git"),
+        ("git_email", env_identity.get("global_git_user_email"), "global_git"),
+        ("windows_upn", env_identity.get("windows_upn"), "windows"),
+        ("hostname", hostname, "environment"),
+        ("os_user", os_user, "environment"),
+        ("user_domain", user_domain, "environment"),
+    ]
+    if os_user and hostname:
+        raw_candidates.append(("os_user_host", f"{os_user}@{hostname}", "environment"))
+    candidates: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for kind, value, source in raw_candidates:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized_kind = normalize_identity_kind(kind)
+        normalized_value = normalize_identity_value(normalized_kind, value)
+        key = (normalized_kind, normalized_value)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append({"kind": normalized_kind, "value": normalized_value, "source": source})
+    return candidates
+
+
+def direct_email_candidate(candidates: list[dict[str, str]]) -> dict[str, str] | None:
+    for candidate in candidates:
+        if candidate["kind"] in {"user_email", "git_email", "windows_upn"} and "@" in candidate["value"]:
+            return candidate
+    return None
 
 
 class WorklogStore:
@@ -492,6 +597,227 @@ class WorklogStore:
         with self._connect() as conn:
             rows = conn.execute(sql, ids).fetchall()
         return [json.loads(row["raw_json"]) for row in rows]
+
+    def identity_mappings(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select identity_kind, identity_value, user_email, display_name, source, created_at, updated_at
+                from identity_mappings
+                order by user_email, identity_kind, identity_value
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_identity_mapping(
+        self,
+        *,
+        identity_kind: str,
+        identity_value: str,
+        user_email: str,
+        display_name: str | None = None,
+        source: str = "manual",
+    ) -> dict[str, Any]:
+        kind = normalize_identity_kind(identity_kind)
+        value = normalize_identity_value(kind, identity_value)
+        email = user_email.strip().lower()
+        if not kind or not value or not email or "@" not in email:
+            raise ValueError("identity_kind, identity_value, and valid user_email are required")
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into identity_mappings (
+                  identity_kind, identity_value, user_email, display_name, source, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?)
+                on conflict(identity_kind, identity_value) do update set
+                  user_email = excluded.user_email,
+                  display_name = excluded.display_name,
+                  source = excluded.source,
+                  updated_at = excluded.updated_at
+                """,
+                (kind, value, email, display_name, source, now, now),
+            )
+        with self._stats_lock:
+            self._write_version += 1
+            self._stats_cache = None
+        return {
+            "identity_kind": kind,
+            "identity_value": value,
+            "user_email": email,
+            "display_name": display_name,
+            "source": source,
+            "updated_at": now,
+        }
+
+    def delete_identity_mapping(self, *, identity_kind: str, identity_value: str) -> bool:
+        kind = normalize_identity_kind(identity_kind)
+        value = normalize_identity_value(kind, identity_value)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "delete from identity_mappings where identity_kind = ? and identity_value = ?",
+                (kind, value),
+            )
+            deleted = cursor.rowcount > 0
+        if deleted:
+            with self._stats_lock:
+                self._write_version += 1
+                self._stats_cache = None
+        return deleted
+
+    def token_report(self, month: str | None = None) -> dict[str, Any]:
+        month_label, start, end = month_bounds(month)
+        with self._connect() as conn:
+            token_rows = conn.execute(
+                """
+                select session_id, token_usage_identity, token_model, ingested_at,
+                       input_tokens, cached_input_tokens, output_tokens,
+                       reasoning_output_tokens, total_tokens, raw_json
+                from records
+                where token_usage_identity is not null
+                  and ingested_at >= ?
+                  and ingested_at < ?
+                order by ingested_at asc
+                """,
+                (start, end),
+            ).fetchall()
+            snapshot_rows = conn.execute(
+                """
+                select raw_json
+                from records
+                where record_type = 'snapshot'
+                """
+            ).fetchall()
+            mapping_rows = conn.execute(
+                """
+                select identity_kind, identity_value, user_email, display_name, source
+                from identity_mappings
+                """
+            ).fetchall()
+
+        mappings = {
+            (str(row["identity_kind"]), str(row["identity_value"])): {
+                "user_email": str(row["user_email"]),
+                "display_name": row["display_name"],
+                "source": row["source"],
+            }
+            for row in mapping_rows
+        }
+        environments_by_ref: dict[str, dict[str, Any]] = {}
+        sessions_by_ref: dict[str, dict[str, Any]] = {}
+        sessions_by_id: dict[str, dict[str, Any]] = {}
+        for row in snapshot_rows:
+            try:
+                snapshot = json.loads(row["raw_json"])
+            except json.JSONDecodeError:
+                continue
+            snapshot_id = string_value(snapshot.get("snapshot_id"))
+            if snapshot.get("snapshot_type") == "environment" and snapshot_id:
+                environments_by_ref[snapshot_id] = nested(snapshot, "environment")
+            elif snapshot.get("snapshot_type") == "session" and snapshot_id:
+                session = nested(snapshot, "session")
+                sessions_by_ref[snapshot_id] = session
+                session_id = string_value(session.get("session_id"))
+                if session_id:
+                    sessions_by_id.setdefault(session_id, session)
+
+        totals = empty_token_totals()
+        users: dict[str, dict[str, Any]] = {}
+        unclaimed: dict[str, dict[str, Any]] = {}
+        seen_usage: set[str] = set()
+
+        def group_for(
+            record: dict[str, Any],
+            row: sqlite3.Row,
+            candidates: list[dict[str, str]],
+        ) -> tuple[str, dict[str, Any], bool]:
+            direct = direct_email_candidate(candidates)
+            if direct:
+                return direct["value"], {"user_email": direct["value"], "display_name": None, "source": direct["kind"]}, True
+            for candidate in candidates:
+                mapping = mappings.get((candidate["kind"], candidate["value"]))
+                if mapping:
+                    return str(mapping["user_email"]), mapping, True
+            fallback = next((item for item in candidates if item["kind"] == "hostname"), None) or next(iter(candidates), None)
+            if fallback:
+                key = f"{fallback['kind']}:{fallback['value']}"
+            else:
+                key = f"session:{row['session_id'] or record.get('session_id') or 'unknown'}"
+            return key, {"user_email": None, "display_name": None, "source": "unclaimed"}, False
+
+        for row in token_rows:
+            identity = str(row["token_usage_identity"])
+            if identity in seen_usage:
+                continue
+            seen_usage.add(identity)
+            try:
+                record = json.loads(row["raw_json"])
+            except json.JSONDecodeError:
+                record = {}
+            session_id = string_value(row["session_id"]) or string_value(record.get("session_id"))
+            session = sessions_by_ref.get(str(record.get("session_ref") or "")) or sessions_by_id.get(session_id or "") or {}
+            environment = environments_by_ref.get(str(record.get("environment_ref") or "")) or {}
+            candidates = identity_candidates(record, session, environment)
+            group_key, identity_info, claimed = group_for(record, row, candidates)
+            target_root = users if claimed else unclaimed
+            target = target_root.setdefault(
+                group_key,
+                {
+                    "user_email": identity_info.get("user_email"),
+                    "display_name": identity_info.get("display_name"),
+                    "identity_key": group_key,
+                    "identity_source": identity_info.get("source"),
+                    "token_totals": empty_token_totals(),
+                    "token_totals_by_model": {},
+                    "sessions": set(),
+                    "hostnames": set(),
+                    "os_users": set(),
+                    "git_emails": set(),
+                    "candidate_identities": {},
+                },
+            )
+            add_token_totals(totals, row)
+            add_token_totals(target["token_totals"], row)
+            model = str(row["token_model"] or record.get("model") or "unknown")
+            model_totals = target["token_totals_by_model"].setdefault(model, empty_token_totals())
+            add_token_totals(model_totals, row)
+            if session_id:
+                target["sessions"].add(session_id)
+            for candidate in candidates:
+                target["candidate_identities"].setdefault(candidate["kind"], set()).add(candidate["value"])
+                if candidate["kind"] == "hostname":
+                    target["hostnames"].add(candidate["value"])
+                elif candidate["kind"] == "os_user":
+                    target["os_users"].add(candidate["value"])
+                elif candidate["kind"] == "git_email":
+                    target["git_emails"].add(candidate["value"])
+
+        def finalize(groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+            items: list[dict[str, Any]] = []
+            for item in groups.values():
+                finalized = dict(item)
+                finalized["sessions"] = sorted(item["sessions"])
+                finalized["session_count"] = len(finalized["sessions"])
+                finalized["hostnames"] = sorted(item["hostnames"])
+                finalized["os_users"] = sorted(item["os_users"])
+                finalized["git_emails"] = sorted(item["git_emails"])
+                finalized["candidate_identities"] = {
+                    key: sorted(values)
+                    for key, values in sorted(item["candidate_identities"].items())
+                }
+                items.append(finalized)
+            items.sort(key=lambda value: int(value["token_totals"].get("total_tokens") or 0), reverse=True)
+            return items
+
+        return {
+            "month": month_label,
+            "range": {"start": start, "end": end},
+            "token_usage_identities": len(seen_usage),
+            "token_totals": totals,
+            "users": finalize(users),
+            "unclaimed": finalize(unclaimed),
+            "identity_mappings": self.identity_mappings(),
+        }
 
     def stats(self) -> dict[str, Any]:
         with self._stats_lock:

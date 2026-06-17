@@ -489,6 +489,72 @@ def skill_metadata(payload: dict[str, Any], operation: dict[str, Any]) -> dict[s
     return {key: value for key, value in metadata.items() if value is not None}
 
 
+def run_metadata_command(args: list[str], cwd: str | None = None, timeout: float = 1.5) -> str | None:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def git_config_value(key: str, cwd: str | None = None) -> str | None:
+    if cwd and Path(cwd).expanduser().exists():
+        value = run_metadata_command(["git", "config", "--get", key], cwd=str(Path(cwd).expanduser()))
+        if value:
+            return value
+    return run_metadata_command(["git", "config", "--global", "--get", key], timeout=1.0)
+
+
+def windows_upn() -> str | None:
+    if platform.system().lower() != "windows":
+        return None
+    value = run_metadata_command(["whoami", "/upn"], timeout=1.0)
+    if value and "@" in value:
+        return value
+    return None
+
+
+def identity_metadata(cwd: str | None, git: dict[str, Any] | None = None) -> dict[str, Any]:
+    os_user = os.environ.get("USER") or os.environ.get("USERNAME") or os.environ.get("LOGNAME")
+    hostname = socket.gethostname()
+    repo_git_email = string_value((git or {}).get("user_email")) or git_config_value("user.email", cwd)
+    repo_git_name = string_value((git or {}).get("user_name")) or git_config_value("user.name", cwd)
+    global_git_email = git_config_value("user.email")
+    global_git_name = git_config_value("user.name")
+    explicit_user_email = os.environ.get("AI_WORKLOG_USER_EMAIL") or os.environ.get("AI_USAGE_COLLECTOR_USER_EMAIL")
+    candidates = {
+        "user_email": explicit_user_email,
+        "git_user_email": repo_git_email,
+        "git_user_name": repo_git_name,
+        "global_git_user_email": global_git_email,
+        "global_git_user_name": global_git_name,
+        "windows_upn": windows_upn(),
+        "os_user": os_user,
+        "user_domain": os.environ.get("USERDOMAIN"),
+        "hostname": hostname,
+    }
+    return {key: value for key, value in candidates.items() if value}
+
+
+def best_user_email(identity: dict[str, Any]) -> str | None:
+    for key in ("user_email", "git_user_email", "global_git_user_email", "windows_upn"):
+        value = string_value(identity.get(key))
+        if value and "@" in value:
+            return value
+    return None
+
+
 def git_metadata(cwd: str | None) -> dict[str, Any] | None:
     if not cwd:
         return None
@@ -497,21 +563,7 @@ def git_metadata(cwd: str | None) -> dict[str, Any] | None:
         return None
 
     def run_git(args: list[str]) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", *args],
-                cwd=str(path),
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=1.5,
-            )
-        except Exception:
-            return None
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip()
+        return run_metadata_command(["git", *args], cwd=str(path))
 
     root = run_git(["rev-parse", "--show-toplevel"])
     if not root:
@@ -522,6 +574,8 @@ def git_metadata(cwd: str | None) -> dict[str, Any] | None:
         "branch": run_git(["branch", "--show-current"]),
         "commit": run_git(["rev-parse", "HEAD"]),
         "dirty": bool(status),
+        "user_email": run_git(["config", "--get", "user.email"]),
+        "user_name": run_git(["config", "--get", "user.name"]),
     }
 
 
@@ -638,6 +692,9 @@ def git_workspace_diff(cwd: str | None) -> dict[str, Any] | None:
 
 
 def environment_metadata(cwd: str | None) -> dict[str, Any]:
+    os_user = os.environ.get("USER") or os.environ.get("USERNAME") or os.environ.get("LOGNAME")
+    git = git_metadata(cwd)
+    identity = identity_metadata(cwd, git)
     return {
         "os": platform.platform(),
         "system": platform.system(),
@@ -645,15 +702,18 @@ def environment_metadata(cwd: str | None) -> dict[str, Any]:
         "machine": platform.machine(),
         "python": platform.python_version(),
         "hostname": socket.gethostname(),
-        "user": os.environ.get("USER") or os.environ.get("USERNAME") or os.environ.get("LOGNAME"),
+        "user": os_user,
+        "user_domain": os.environ.get("USERDOMAIN"),
         "shell": os.environ.get("SHELL"),
         "term_program": os.environ.get("TERM_PROGRAM"),
         "cwd": cwd,
-        "git": git_metadata(cwd),
+        "git": git,
+        "identity": identity,
     }
 
 
 def compact_session_metadata(payload: dict[str, Any], surface: str, cwd: str | None, transcript_path: str | None) -> dict[str, Any]:
+    identity = identity_metadata(cwd)
     return {
         "surface": surface,
         "session_id": value_at(payload, "session_id", "sessionId", "conversation_id", "conversationId"),
@@ -661,7 +721,7 @@ def compact_session_metadata(payload: dict[str, Any], surface: str, cwd: str | N
         "agent_type": value_at(payload, "agent_type", "agentType"),
         "model": value_at(payload, "model", "model_name", "modelName"),
         "permission_mode": value_at(payload, "permission_mode", "permissionMode"),
-        "user_email": value_at(payload, "user_email", "userEmail"),
+        "user_email": value_at(payload, "user_email", "userEmail") or best_user_email(identity),
         "cwd": cwd,
         "transcript_path": transcript_path,
     }

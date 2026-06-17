@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,32 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(journal.read_stdin_json()["prompt"], "好，按你的推荐实现")
         finally:
             sys.stdin = original_stdin
+
+    def test_session_identity_uses_git_email_without_explicit_env(self) -> None:
+        original_run = journal.run_metadata_command
+        original_user_email = os.environ.pop("AI_WORKLOG_USER_EMAIL", None)
+        original_legacy_user_email = os.environ.pop("AI_USAGE_COLLECTOR_USER_EMAIL", None)
+
+        def fake_run(args, cwd=None, timeout=1.5):
+            if args == ["git", "config", "--get", "user.email"]:
+                return "dev@example.com"
+            if args == ["git", "config", "--get", "user.name"]:
+                return "Dev User"
+            return None
+
+        try:
+            journal.run_metadata_command = fake_run
+            session = journal.compact_session_metadata({}, "codex", "/tmp", None)
+            identity = journal.identity_metadata("/tmp")
+        finally:
+            journal.run_metadata_command = original_run
+            if original_user_email is not None:
+                os.environ["AI_WORKLOG_USER_EMAIL"] = original_user_email
+            if original_legacy_user_email is not None:
+                os.environ["AI_USAGE_COLLECTOR_USER_EMAIL"] = original_legacy_user_email
+
+        self.assertEqual(session["user_email"], "dev@example.com")
+        self.assertEqual(identity["git_user_email"], "dev@example.com")
 
     def test_codex_backfill_builds_stable_records_from_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
