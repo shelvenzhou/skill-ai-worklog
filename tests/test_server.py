@@ -12,6 +12,7 @@ from server.ai_worklog_server.analysis import build_session_detail, build_sessio
 from server.ai_worklog_server.app import build_server, parse_record_pks, parse_records
 from server.ai_worklog_server.metrics import compute_code_metrics
 from server.ai_worklog_server.storage import WorklogStore
+from server.ai_worklog_server.trellis import infer_trellis_metrics
 
 
 class ParseRecordsTests(unittest.TestCase):
@@ -610,6 +611,50 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["events"][1]["display"]["tool_input"], {"command": "lark-cli approval instances get --help"})
         self.assertEqual(detail["events"][1]["display"]["tool_response"], "获取单个审批实例详情")
 
+    def test_trellis_metrics_infer_usage_task_phase_and_problem_signals(self) -> None:
+        events = [
+            {
+                "record_type": "event",
+                "event_id": "trellis1",
+                "received_at": "2026-06-16T01:00:00Z",
+                "session_id": "s1",
+                "hook_event_name": "PostToolUse",
+                "operation": {"category": "tool", "phase": "after", "success": True},
+                "tool": {"name": "Bash", "command": "python ./.trellis/scripts/get_context.py --mode phase --step 1.1"},
+                "content": {"tool_response": "Current task: .trellis/tasks/06-17-demo\n#### 1.1 Requirement exploration"},
+            },
+            {
+                "record_type": "event",
+                "event_id": "trellis2",
+                "received_at": "2026-06-16T01:00:01Z",
+                "session_id": "s1",
+                "hook_event_name": "PostToolUse",
+                "operation": {"category": "tool", "phase": "after", "success": True},
+                "tool": {"name": "Bash", "command": "Get-Content .trellis/tasks/06-17-demo/check.jsonl"},
+                "content": {"tool_response": "error: missing backend spec"},
+            },
+            {
+                "record_type": "event",
+                "event_id": "plain",
+                "received_at": "2026-06-16T01:00:02Z",
+                "session_id": "s2",
+                "hook_event_name": "PostToolUse",
+                "tool": {"name": "Bash", "command": "git status"},
+            },
+        ]
+
+        metrics = infer_trellis_metrics(events)
+        detail = build_session_detail("s1", events, [])
+
+        self.assertEqual(metrics["trellis_sessions"], 1)
+        self.assertEqual(metrics["non_trellis_sessions"], 1)
+        self.assertEqual(metrics["sessions"]["s1"]["task_ids"], ["06-17-demo"])
+        self.assertEqual(metrics["sessions"]["s1"]["phase_counts"]["requirements"], 1)
+        self.assertEqual(metrics["sessions"]["s1"]["phase_counts"]["check"], 1)
+        self.assertEqual(metrics["sessions"]["s1"]["problem_signal_count"], 1)
+        self.assertTrue(detail["trellis_signals"]["uses_trellis"])
+        self.assertEqual(detail["trellis_signals"]["task_ids"], ["06-17-demo"])
+
     def test_session_detail_includes_transcript_agent_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             transcript = Path(tmp) / "rollout.jsonl"
@@ -719,6 +764,14 @@ class AppEndpointTests(unittest.TestCase):
                         "model": "gpt-test",
                         "usage": {"timestamp": "turn1", "info": {"last_token_usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}}},
                     },
+                    {
+                        "record_type": "event",
+                        "event_id": "trellis",
+                        "session_id": "s1",
+                        "hook_event_name": "PostToolUse",
+                        "tool": {"name": "Bash", "command": "python ./.trellis/scripts/get_context.py --mode phase --step 1.1"},
+                        "content": {"tool_response": "Current task: .trellis/tasks/06-17-demo\nRequirement exploration"},
+                    },
                 ]
                 event_request = urllib.request.Request(
                     f"{base_url}/events",
@@ -746,6 +799,11 @@ class AppEndpointTests(unittest.TestCase):
                     claimed = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(claimed["users"][0]["user_email"], "devc@example.com")
                 self.assertEqual(claimed["users"][0]["token_totals"]["total_tokens"], 5)
+
+                with urllib.request.urlopen(f"{base_url}/metrics/trellis", timeout=5) as response:
+                    trellis = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(trellis["trellis_sessions"], 1)
+                self.assertEqual(trellis["sessions"]["s1"]["task_ids"], ["06-17-demo"])
             finally:
                 server.shutdown()
                 server.server_close()

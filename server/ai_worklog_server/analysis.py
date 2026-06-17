@@ -8,6 +8,7 @@ from typing import Any
 
 from .metrics import compute_code_metrics
 from .storage import session_models, token_totals, token_totals_by_model
+from .trellis import infer_trellis_session
 
 
 MOJIBAKE_MARKERS = (
@@ -553,5 +554,6 @@ def build_session_detail(
             "adopted_code": code_metrics["adopted_code"],
             "uncommitted_code": code_metrics["uncommitted_code"],
         },
+        "trellis_signals": infer_trellis_session(metric_records),
         "process": process_summary(ordered),
     }

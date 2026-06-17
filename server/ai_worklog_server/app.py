@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .analysis import build_session_detail, build_sessions_index, transcript_apply_patch_events
 from .metrics import compute_code_metrics
 from .storage import WorklogStore
+from .trellis import infer_trellis_metrics
 
 
 def parse_records(body: bytes, content_type: str) -> list[dict[str, Any]]:
@@ -701,6 +702,16 @@ class WorklogHandler(BaseHTTPRequestHandler):
                 write_json(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             write_json(self, HTTPStatus.OK, payload)
+            return
+
+        if parsed.path == "/metrics/trellis":
+            query = parse_qs(parsed.query)
+            records = self.store.query_records_for_metrics(
+                record_type="event",
+                surface=(query.get("surface") or [None])[0],
+                session_id=(query.get("session_id") or [None])[0],
+            )
+            write_json(self, HTTPStatus.OK, infer_trellis_metrics(records))
             return
 
         if parsed.path == "/identity/mappings":
