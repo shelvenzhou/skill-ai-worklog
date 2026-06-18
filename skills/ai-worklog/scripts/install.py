@@ -264,8 +264,18 @@ def remove_hooks(path: Path, versioned: bool, dry_run: bool) -> int:
     return removed
 
 
-def update_config(args: argparse.Namespace, dry_run: bool) -> None:
+def resolved_server_url(args: argparse.Namespace, cfg: dict[str, Any]) -> str | None:
+    if args.clear_server_url:
+        return None
+    if args.server_url is not None:
+        return args.server_url
+    existing = cfg.get("server_url")
+    return str(existing) if existing else None
+
+
+def update_config(args: argparse.Namespace, dry_run: bool) -> dict[str, Any]:
     cfg = read_json(CONFIG_PATH)
+    server_url = resolved_server_url(args, cfg)
     cfg.update(
         {
             "enabled": args.level != "off",
@@ -273,7 +283,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
             "local_log_dir": str(Path(args.local_log_dir).expanduser()),
             "snapshot_log_dir": str(Path(args.snapshot_log_dir).expanduser()),
             "failed_log_dir": str(Path(args.failed_log_dir).expanduser()),
-            "server_url": args.server_url,
+            "server_url": server_url,
             "api_key_env": args.api_key_env,
             "request_timeout_seconds": args.timeout,
             "upload_mode": "sync" if args.sync_upload else "async",
@@ -325,6 +335,7 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> None:
         cfg["codex_history_backfill"]["upload_state"] = str(Path(args.backfill_upload_state).expanduser())
     write_json(CONFIG_PATH, cfg, dry_run)
     print(f"Configured worklog at {CONFIG_PATH}")
+    return cfg
 
 
 def disable_config(dry_run: bool) -> None:
@@ -438,7 +449,9 @@ def install_cursor(args: argparse.Namespace) -> None:
 
 
 def run_codex_backfill(args: argparse.Namespace, skill_dir: Path) -> None:
-    if not args.server_url and not args.dry_run:
+    cfg = read_json(CONFIG_PATH)
+    server_url = resolved_server_url(args, cfg)
+    if not server_url and not args.dry_run:
         raise ValueError("--backfill-codex-history requires --server-url")
     script = skill_dir / "scripts" / "codex_backfill.py"
     command = [
@@ -449,8 +462,8 @@ def run_codex_backfill(args: argparse.Namespace, skill_dir: Path) -> None:
         "--batch-size",
         str(args.backfill_batch_size),
     ]
-    if args.server_url:
-        command.extend(["--server-url", str(args.server_url)])
+    if server_url:
+        command.extend(["--server-url", str(server_url)])
     if args.backfill_limit is not None:
         command.extend(["--limit", str(args.backfill_limit)])
     if args.backfill_upload_state:
@@ -491,10 +504,10 @@ def run(args: argparse.Namespace) -> int:
     if args.backfill_codex_history:
         if args.surface not in {"codex", "both"}:
             raise ValueError("--backfill-codex-history requires --surface codex or --surface both")
-        if not args.server_url and not args.dry_run:
+        if not resolved_server_url(args, read_json(CONFIG_PATH)) and not args.dry_run:
             raise ValueError("--backfill-codex-history requires --server-url")
 
-    update_config(args, args.dry_run)
+    cfg = update_config(args, args.dry_run)
     codex_skill_dir: Path | None = None
     if args.surface in {"codex", "both"}:
         codex_skill_dir = install_codex(args)
@@ -508,8 +521,8 @@ def run(args: argparse.Namespace) -> int:
     print("AI worklog installation complete.")
     print(f"Local event logs: {Path(args.local_log_dir).expanduser()}")
     print(f"Local snapshots: {Path(args.snapshot_log_dir).expanduser()}")
-    if args.server_url:
-        print(f"Upload endpoint: {args.server_url}")
+    if cfg.get("server_url"):
+        print(f"Upload endpoint: {cfg['server_url']}")
     if not args.dry_run:
         import doctor
 
@@ -528,6 +541,7 @@ def main() -> int:
     parser.add_argument("--hook-set", choices=["minimal", "full"], default="minimal")
     parser.add_argument("--uninstall", action="store_true", help="Remove AI worklog hook handlers and disable collection without deleting logs.")
     parser.add_argument("--server-url", default=os.environ.get("AI_WORKLOG_SERVER_URL") or os.environ.get("AI_USAGE_COLLECTOR_SERVER_URL"))
+    parser.add_argument("--clear-server-url", action="store_true", help="Explicitly clear any configured upload endpoint and keep logging local-only.")
     parser.add_argument("--api-key-env", default="AI_WORKLOG_API_KEY")
     parser.add_argument("--local-log-dir", default=str(CONFIG_HOME / "events"))
     parser.add_argument("--snapshot-log-dir", default=str(CONFIG_HOME / "snapshots"))

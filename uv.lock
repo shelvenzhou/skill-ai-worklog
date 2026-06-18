@@ -4,5 +4,5 @@ requires-python = ">=3.9"
 
 [[package]]
 name = "ai-worklog-observability"
-version = "0.3.4"
+version = "0.3.5"
 source = { virtual = "." }

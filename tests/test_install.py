@@ -308,6 +308,7 @@ class InstallScriptTests(unittest.TestCase):
                 snapshot_log_dir=str(Path(tmp) / "snapshots"),
                 failed_log_dir=str(Path(tmp) / "failed"),
                 server_url="http://collector.example/events",
+                clear_server_url=False,
                 api_key_env="AI_WORKLOG_API_KEY",
                 timeout=2.0,
                 sync_upload=False,
@@ -356,7 +357,7 @@ class InstallScriptTests(unittest.TestCase):
                 {
                     "enabled": True,
                     "name": "ai-worklog",
-                    "current_version": "0.3.4",
+                    "current_version": "0.3.5",
                     "manifest_url": "https://example.com/manifest.json",
                     "source_url": "https://example.com/skill",
                     "trigger_interval_seconds": 86400,
@@ -375,6 +376,98 @@ class InstallScriptTests(unittest.TestCase):
                     "upload_state": str(Path(tmp) / "backfill.sqlite3"),
                 },
             )
+
+    def test_update_config_preserves_existing_server_url_when_omitted(self) -> None:
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"server_url": "http://collector.example/events"}) + "\n", encoding="utf-8")
+            original_config_path = installer.CONFIG_PATH
+            installer.CONFIG_PATH = config_path
+            args = argparse.Namespace(
+                level="full",
+                local_log_dir=str(Path(tmp) / "events"),
+                snapshot_log_dir=str(Path(tmp) / "snapshots"),
+                failed_log_dir=str(Path(tmp) / "failed"),
+                server_url=None,
+                clear_server_url=False,
+                api_key_env="AI_WORKLOG_API_KEY",
+                timeout=2.0,
+                sync_upload=False,
+                no_upload_preflight=False,
+                max_transcript_bytes=1024,
+                hook_set="minimal",
+                async_upload_batch_size=100,
+                async_upload_trigger_interval_seconds=60,
+                async_upload_lock_stale_seconds=600,
+                async_upload_lock_wait_seconds=30,
+                async_upload_max_runtime_seconds=120,
+                no_skill_update_check=False,
+                skill_update_manifest_url="https://example.com/manifest.json",
+                skill_source_url="https://example.com/skill",
+                skill_update_trigger_interval_seconds=86400,
+                no_auto_codex_backfill=False,
+                backfill_batch_size=250,
+                backfill_trigger_interval_seconds=86400,
+                backfill_lock_stale_seconds=21600,
+                backfill_lock_wait_seconds=30,
+                backfill_max_runtime_seconds=1800,
+                backfill_limit=None,
+                backfill_upload_state=None,
+            )
+            try:
+                installer.update_config(args, dry_run=False)
+            finally:
+                installer.CONFIG_PATH = original_config_path
+
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(cfg["server_url"], "http://collector.example/events")
+
+    def test_update_config_can_explicitly_clear_server_url(self) -> None:
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"server_url": "http://collector.example/events"}) + "\n", encoding="utf-8")
+            original_config_path = installer.CONFIG_PATH
+            installer.CONFIG_PATH = config_path
+            args = argparse.Namespace(
+                level="full",
+                local_log_dir=str(Path(tmp) / "events"),
+                snapshot_log_dir=str(Path(tmp) / "snapshots"),
+                failed_log_dir=str(Path(tmp) / "failed"),
+                server_url=None,
+                clear_server_url=True,
+                api_key_env="AI_WORKLOG_API_KEY",
+                timeout=2.0,
+                sync_upload=False,
+                no_upload_preflight=False,
+                max_transcript_bytes=1024,
+                hook_set="minimal",
+                async_upload_batch_size=100,
+                async_upload_trigger_interval_seconds=60,
+                async_upload_lock_stale_seconds=600,
+                async_upload_lock_wait_seconds=30,
+                async_upload_max_runtime_seconds=120,
+                no_skill_update_check=False,
+                skill_update_manifest_url="https://example.com/manifest.json",
+                skill_source_url="https://example.com/skill",
+                skill_update_trigger_interval_seconds=86400,
+                no_auto_codex_backfill=False,
+                backfill_batch_size=250,
+                backfill_trigger_interval_seconds=86400,
+                backfill_lock_stale_seconds=21600,
+                backfill_lock_wait_seconds=30,
+                backfill_max_runtime_seconds=1800,
+                backfill_limit=None,
+                backfill_upload_state=None,
+            )
+            try:
+                installer.update_config(args, dry_run=False)
+            finally:
+                installer.CONFIG_PATH = original_config_path
+
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertIsNone(cfg["server_url"])
 
     def test_main_reports_permission_error_without_traceback(self) -> None:
         installer = load_installer()
