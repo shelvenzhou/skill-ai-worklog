@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import tempfile
 import unittest
@@ -97,6 +98,125 @@ class StoreTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(store.stats()["token_totals"]["total_tokens"], 5)
+
+    def test_estimates_cursor_tokens_from_full_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            store.insert_many(
+                [
+                    {
+                        "record_type": "event",
+                        "event_id": "cursor-e1",
+                        "surface": "cursor",
+                        "source_id": "cursor-backfill",
+                        "collection_level": "full",
+                        "session_id": "cursor-s1",
+                        "hook_event_name": "beforeSubmitPrompt",
+                        "content": {"prompt": "a" * 8},
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "cursor-e2",
+                        "surface": "cursor",
+                        "source_id": "cursor-backfill",
+                        "collection_level": "full",
+                        "session_id": "cursor-s1",
+                        "hook_event_name": "afterAgentResponse",
+                        "content": {"response": "b" * 12},
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "cursor-e3",
+                        "surface": "cursor",
+                        "source_id": "ai-worklog-doctor",
+                        "collection_level": "full",
+                        "session_id": "doctor-s1",
+                        "hook_event_name": "beforeSubmitPrompt",
+                        "content": {"prompt": "c" * 100},
+                    },
+                ]
+            )
+
+            stats = store.stats()
+
+            self.assertEqual(stats["token_totals"]["input_tokens"], 2)
+            self.assertEqual(stats["token_totals"]["output_tokens"], 3)
+            self.assertEqual(stats["token_totals"]["total_tokens"], 5)
+
+    def test_real_usage_takes_precedence_over_cursor_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            usage = {
+                "timestamp": "2026-06-18T00:00:00Z",
+                "info": {"last_token_usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+            }
+            store.insert_many(
+                [
+                    {
+                        "record_type": "event",
+                        "event_id": "cursor-e1",
+                        "surface": "cursor",
+                        "source_id": "cursor-backfill",
+                        "collection_level": "full",
+                        "session_id": "cursor-s1",
+                        "hook_event_name": "afterAgentResponse",
+                        "content": {"response": "b" * 1000},
+                        "usage": usage,
+                    },
+                    {
+                        "record_type": "event",
+                        "event_id": "cursor-e2",
+                        "surface": "cursor",
+                        "source_id": "cursor-backfill",
+                        "collection_level": "full",
+                        "session_id": "cursor-s1",
+                        "hook_event_name": "stop",
+                        "content": {"response": "b" * 1000},
+                        "usage": usage,
+                    },
+                ]
+            )
+
+            self.assertEqual(store.stats()["token_totals"]["total_tokens"], 3)
+
+    def test_migration_backfills_existing_cursor_estimate_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            record = {
+                "record_type": "event",
+                "event_id": "cursor-old",
+                "surface": "cursor",
+                "source_id": "cursor-backfill",
+                "collection_level": "full",
+                "session_id": "cursor-s1",
+                "hook_event_name": "beforeSubmitPrompt",
+                "content": {"prompt": "a" * 8},
+            }
+            with sqlite3.connect(store.db_path) as conn:
+                conn.execute(
+                    """
+                    insert into records (
+                      record_pk, record_type, event_id, surface, session_id,
+                      hook_event_name, collection_level, ingested_at, raw_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "event:cursor-old",
+                        "event",
+                        "cursor-old",
+                        "cursor",
+                        "cursor-s1",
+                        "beforeSubmitPrompt",
+                        "full",
+                        "2026-06-18T00:00:00Z",
+                        json.dumps(record),
+                    ),
+                )
+
+            migrated = WorklogStore(Path(tmp))
+
+            self.assertEqual(migrated.stats()["token_totals"]["input_tokens"], 2)
+            self.assertEqual(migrated.stats()["token_totals"]["total_tokens"], 2)
 
     def test_stats_deduplicate_repeated_transcript_token_usage(self) -> None:
         usage = {

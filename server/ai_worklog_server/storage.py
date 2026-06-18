@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 from pathlib import Path
@@ -15,6 +16,8 @@ TOKEN_TOTAL_KEYS = (
     "reasoning_output_tokens",
     "total_tokens",
 )
+
+CURSOR_ESTIMATE_SOURCE = "cursor_content_estimate"
 
 
 SCHEMA = """
@@ -114,7 +117,7 @@ def month_bounds(month: str | None) -> tuple[str, str, str]:
     )
 
 
-def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
+def reported_token_payload(record: dict[str, Any]) -> dict[str, Any]:
     usage = record.get("usage")
     info = usage.get("info") if isinstance(usage, dict) else None
     last = info.get("last_token_usage") if isinstance(info, dict) else None
@@ -124,6 +127,19 @@ def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
             last = hook_usage["last_token_usage"]
         else:
             last = hook_usage if isinstance(hook_usage, dict) else {}
+    return last if isinstance(last, dict) else {}
+
+
+def has_token_values(payload: dict[str, Any]) -> bool:
+    return any(key in payload for key in TOKEN_TOTAL_KEYS)
+
+
+def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
+    last = reported_token_payload(record)
+    if not has_token_values(last):
+        estimated = estimated_cursor_token_usage(record)
+        if estimated is not None:
+            last = estimated
 
     def as_int(key: str) -> int | None:
         value = last.get(key)
@@ -138,10 +154,88 @@ def token_usage(record: dict[str, Any]) -> dict[str, int | None]:
     return {key: as_int(key) for key in TOKEN_TOTAL_KEYS}
 
 
+def text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [part for item in value.values() for part in text_values(item)]
+    if isinstance(value, list):
+        return [part for item in value for part in text_values(item)]
+    return []
+
+
+def value_text(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json_dumps(value)
+    return "\n".join(text_values(value))
+
+
+def estimated_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    cjk_chars = 0
+    other_chars = 0
+    for char in text:
+        codepoint = ord(char)
+        if (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+            or 0x3040 <= codepoint <= 0x30FF
+            or 0xAC00 <= codepoint <= 0xD7AF
+        ):
+            cjk_chars += 1
+        elif not char.isspace():
+            other_chars += 1
+    return int(math.ceil(cjk_chars + (other_chars / 4)))
+
+
+def estimated_cursor_token_usage(record: dict[str, Any]) -> dict[str, int] | None:
+    if record.get("surface") != "cursor" or record.get("record_type") != "event":
+        return None
+    if record.get("source_id") == "ai-worklog-doctor":
+        return None
+    if str(record.get("collection_level") or "").lower() != "full":
+        return None
+
+    content = record.get("content") if isinstance(record.get("content"), dict) else {}
+    raw_hook_input = record.get("raw_hook_input") if isinstance(record.get("raw_hook_input"), dict) else {}
+
+    def content_for(*keys: str) -> str:
+        parts: list[str] = []
+        for key in keys:
+            if key in content:
+                parts.append(value_text(content[key]))
+            elif key in raw_hook_input:
+                parts.append(value_text(raw_hook_input[key]))
+        return "\n".join(part for part in parts if part)
+
+    prompt_tokens = estimated_text_tokens(content_for("prompt"))
+    response_tokens = estimated_text_tokens(content_for("response"))
+    tool_call_tokens = estimated_text_tokens(content_for("tool_input", "input", "args"))
+    tool_result_tokens = estimated_text_tokens(content_for("tool_response", "output", "result"))
+
+    input_tokens = prompt_tokens + tool_result_tokens
+    output_tokens = response_tokens + tool_call_tokens
+    total_tokens = input_tokens + output_tokens
+    if total_tokens <= 0:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": 0,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": 0,
+        "total_tokens": total_tokens,
+    }
+
+
 def token_usage_identity(record: dict[str, Any]) -> str | None:
     tokens = token_usage(record)
     if all(value is None for value in tokens.values()):
         return None
+
+    if not has_token_values(reported_token_payload(record)) and estimated_cursor_token_usage(record) is not None:
+        return "|".join([str(record.get("session_id") or "unknown"), CURSOR_ESTIMATE_SOURCE, record_pk(record)])
 
     usage = record.get("usage")
     usage_timestamp = usage.get("timestamp") if isinstance(usage, dict) else None
@@ -484,9 +578,16 @@ class WorklogStore:
             select record_pk, raw_json
             from records
             where token_usage_identity is null
+               or (
+                 input_tokens is null
+                 and cached_input_tokens is null
+                 and output_tokens is null
+                 and reasoning_output_tokens is null
+                 and total_tokens is null
+               )
             """
         ).fetchall()
-        updates: list[tuple[str | None, str, str]] = []
+        updates: list[tuple[int | None, int | None, int | None, int | None, int | None, str | None, str, str]] = []
         for row in rows:
             try:
                 record = json.loads(row["raw_json"])
@@ -495,10 +596,32 @@ class WorklogStore:
             identity = token_usage_identity(record)
             if identity is None:
                 continue
-            updates.append((identity, token_model(record), str(row["record_pk"])))
+            tokens = token_usage(record)
+            updates.append(
+                (
+                    tokens["input_tokens"],
+                    tokens["cached_input_tokens"],
+                    tokens["output_tokens"],
+                    tokens["reasoning_output_tokens"],
+                    tokens["total_tokens"],
+                    identity,
+                    token_model(record),
+                    str(row["record_pk"]),
+                )
+            )
         if updates:
             conn.executemany(
-                "update records set token_usage_identity = ?, token_model = ? where record_pk = ?",
+                """
+                update records
+                set input_tokens = ?,
+                    cached_input_tokens = ?,
+                    output_tokens = ?,
+                    reasoning_output_tokens = ?,
+                    total_tokens = ?,
+                    token_usage_identity = ?,
+                    token_model = ?
+                where record_pk = ?
+                """,
                 updates,
             )
 
