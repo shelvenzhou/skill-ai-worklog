@@ -308,6 +308,143 @@ def direct_email_candidate(candidates: list[dict[str, str]]) -> dict[str, str] |
     return None
 
 
+def mapping_index(mapping_rows: list[dict[str, Any]] | list[sqlite3.Row]) -> dict[tuple[str, str], dict[str, Any]]:
+    return {
+        (str(row["identity_kind"]), str(row["identity_value"])): {
+            "user_email": str(row["user_email"]),
+            "display_name": row["display_name"],
+            "source": row["source"],
+        }
+        for row in mapping_rows
+    }
+
+
+def resolve_identity(
+    candidates: list[dict[str, str]],
+    mappings: dict[tuple[str, str], dict[str, Any]],
+    fallback_key: str,
+) -> dict[str, Any]:
+    seen: set[tuple[str, str]] = set()
+    unique_candidates: list[dict[str, str]] = []
+    for candidate in candidates:
+        key = (candidate["kind"], candidate["value"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+
+    matched_identity: dict[str, str] | None = None
+    identity_info: dict[str, Any] | None = None
+    claimed = False
+    identity_key = fallback_key
+    for candidate in unique_candidates:
+        mapping = mappings.get((candidate["kind"], candidate["value"]))
+        if mapping:
+            matched_identity = {"kind": candidate["kind"], "value": candidate["value"]}
+            identity_info = mapping
+            identity_key = str(mapping["user_email"])
+            claimed = True
+            break
+
+    if identity_info is None:
+        direct = direct_email_candidate(unique_candidates)
+        if direct:
+            matched_identity = {"kind": direct["kind"], "value": direct["value"]}
+            identity_info = {"user_email": direct["value"], "display_name": None, "source": direct["kind"]}
+            identity_key = direct["value"]
+            claimed = True
+
+    if identity_info is None:
+        fallback = next((item for item in unique_candidates if item["kind"] == "hostname"), None) or next(
+            iter(unique_candidates),
+            None,
+        )
+        if fallback:
+            matched_identity = {"kind": fallback["kind"], "value": fallback["value"]}
+            identity_key = f"{fallback['kind']}:{fallback['value']}"
+        identity_info = {"user_email": None, "display_name": None, "source": "unclaimed"}
+
+    candidate_identities: dict[str, set[str]] = {}
+    hostnames: set[str] = set()
+    os_users: set[str] = set()
+    git_emails: set[str] = set()
+    for candidate in unique_candidates:
+        candidate_identities.setdefault(candidate["kind"], set()).add(candidate["value"])
+        if candidate["kind"] == "hostname":
+            hostnames.add(candidate["value"])
+        elif candidate["kind"] == "os_user":
+            os_users.add(candidate["value"])
+        elif candidate["kind"] == "git_email":
+            git_emails.add(candidate["value"])
+
+    return {
+        "user_email": identity_info.get("user_email"),
+        "display_name": identity_info.get("display_name"),
+        "identity_key": identity_key,
+        "identity_source": identity_info.get("source"),
+        "matched_identity": matched_identity,
+        "claimed": claimed,
+        "hostnames": sorted(hostnames),
+        "os_users": sorted(os_users),
+        "git_emails": sorted(git_emails),
+        "candidate_identities": {
+            key: sorted(values)
+            for key, values in sorted(candidate_identities.items())
+        },
+    }
+
+
+def snapshot_context(snapshot_records: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    environments_by_ref: dict[str, dict[str, Any]] = {}
+    sessions_by_ref: dict[str, dict[str, Any]] = {}
+    sessions_by_id: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshot_records:
+        snapshot_id = string_value(snapshot.get("snapshot_id"))
+        if snapshot.get("snapshot_type") == "environment" and snapshot_id:
+            environments_by_ref[snapshot_id] = nested(snapshot, "environment")
+            continue
+        if snapshot.get("snapshot_type") != "session" or not snapshot_id:
+            continue
+        session = nested(snapshot, "session")
+        sessions_by_ref[snapshot_id] = session
+        session_id = string_value(session.get("session_id"))
+        if session_id:
+            sessions_by_id.setdefault(session_id, session)
+    return environments_by_ref, sessions_by_ref, sessions_by_id
+
+
+def session_user_summary(
+    session_id: str,
+    records: list[dict[str, Any]],
+    snapshot_records: list[dict[str, Any]] | None = None,
+    identity_mappings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    snapshots = snapshot_records or []
+    environments_by_ref, sessions_by_ref, sessions_by_id = snapshot_context(snapshots)
+    mappings = mapping_index(identity_mappings or [])
+    candidates: list[dict[str, str]] = []
+
+    for record in records:
+        record_session_id = string_value(record.get("session_id"))
+        if record_session_id not in (None, "", session_id):
+            continue
+        session = sessions_by_ref.get(str(record.get("session_ref") or "")) or sessions_by_id.get(record_session_id or session_id) or {}
+        environment = environments_by_ref.get(str(record.get("environment_ref") or "")) or {}
+        candidates.extend(identity_candidates(record, session, environment))
+
+    for snapshot in snapshots:
+        if snapshot.get("snapshot_type") != "session":
+            continue
+        session = nested(snapshot, "session")
+        snapshot_session_id = string_value(session.get("session_id"))
+        if snapshot_session_id not in (None, "", session_id):
+            continue
+        environment = environments_by_ref.get(str(snapshot.get("environment_ref") or "")) or {}
+        candidates.extend(identity_candidates(snapshot, session, environment))
+
+    return resolve_identity(candidates, mappings, f"session:{session_id or 'unknown'}")
+
+
 class WorklogStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir.expanduser()

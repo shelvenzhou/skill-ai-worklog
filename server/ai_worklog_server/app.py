@@ -367,6 +367,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     function setStatus(text) { $("status").textContent = text; }
     function compact(value) { return value == null || value === "" ? "-" : String(value); }
     function count(obj, key) { return Number((obj || {})[key] || 0); }
+    function tokenValue(totals, key) { return Number((totals || {})[key] || 0); }
+    function userLabel(user) { return compact(user?.display_name || user?.user_email || user?.identity_key); }
+    function identityLabel(user) {
+      if (!user) return "-";
+      const matched = user.matched_identity ? `${user.matched_identity.kind}:${user.matched_identity.value}` : user.identity_key;
+      return `${user.claimed ? "claimed" : "unclaimed"} ${compact(user.identity_source)} ${compact(matched)}`;
+    }
+    function modelTokenSummary(byModel) {
+      const entries = Object.entries(byModel || {});
+      if (!entries.length) return "-";
+      return entries.map(([model, totals]) => `${model}: ${fmt.format(tokenValue(totals, "total_tokens"))}`).join(" / ");
+    }
     function metric(label, value) {
       const el = document.createElement("div");
       el.className = "metric";
@@ -433,6 +445,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       const process = session.process || {};
       return [
         session.session_id,
+        session.user?.user_email,
+        session.user?.display_name,
+        session.user?.identity_key,
         ...(session.surfaces || []),
         ...Object.keys(process.tool_counts || {}),
         ...Object.keys(process.skill_counts || {}),
@@ -454,12 +469,15 @@ DASHBOARD_HTML = r"""<!doctype html>
         const process = session.process || {};
         const generated = session.code_metrics?.generated_code || {};
         const uncommitted = session.code_metrics?.uncommitted_code || {};
+        const tokens = session.token_totals || {};
         const tools = Object.entries(process.tool_counts || {}).map(([name, count]) => `${name}:${count}`).join(" ");
         btn.innerHTML = `<div class="session-title"><span class="sid mono"></span><span class="pill"></span></div><div class="row"></div><div class="label muted"></div>`;
         btn.querySelector(".sid").textContent = shortId(session.session_id);
-        btn.querySelector(".pill").textContent = `${session.event_count || 0} events`;
+        btn.querySelector(".pill").textContent = `${fmt.format(tokenValue(tokens, "total_tokens"))} tokens`;
         const row = btn.querySelector(".row");
+        row.append(pill(userLabel(session.user)));
         row.append(pill((session.surfaces || ["unknown"]).join(",")));
+        row.append(pill(`${session.event_count || 0} events`));
         row.append(pill(`${count(process.operation_category_counts, "tool")} tools`));
         row.append(pill(`${generated.additions || 0}+ code`));
         if (uncommitted.additions || uncommitted.deletions) row.append(pill(`${uncommitted.additions || 0}+ uncommitted`));
@@ -486,7 +504,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       const adopted = session.code_metrics?.adopted_code || {};
       const uncommitted = session.code_metrics?.uncommitted_code || {};
       const latestCommit = session.code_metrics?.latest_git_commit_code || {};
+      const tokens = session.token_totals || {};
       $("summary").replaceChildren(
+        mini("user", userLabel(session.user)),
+        mini("tokens", fmt.format(tokenValue(tokens, "total_tokens"))),
+        mini("input", fmt.format(tokenValue(tokens, "input_tokens"))),
+        mini("cached", fmt.format(tokenValue(tokens, "cached_input_tokens"))),
+        mini("output", fmt.format(tokenValue(tokens, "output_tokens"))),
+        mini("reasoning", fmt.format(tokenValue(tokens, "reasoning_output_tokens"))),
         mini("events", session.event_count || 0),
         mini("tools", count(proc.operation_category_counts, "tool")),
         mini("generated", `${generated.additions || 0}+ / ${generated.files || 0} files`),
@@ -527,6 +552,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       const envSnapshot = (snapshots.environment || [])[0]?.environment || {};
       const git = envSnapshot.git || {};
       $("config").replaceChildren(
+        configItem("user", userLabel(state.detail?.session?.user)),
+        configItem("identity", identityLabel(state.detail?.session?.user)),
+        configItem("token models", modelTokenSummary(state.detail?.session?.token_totals_by_model)),
         configItem("model", sessionSnapshot.model),
         configItem("permission", sessionSnapshot.permission_mode),
         configItem("cwd", sessionSnapshot.cwd || envSnapshot.cwd),
@@ -638,6 +666,30 @@ class WorklogHandler(BaseHTTPRequestHandler):
     sessions_cache: dict[tuple[int, int, str | None, int], dict[str, Any]] = {}
     sessions_cache_lock = threading.Lock()
 
+    def related_snapshots(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        snapshot_ids: set[str] = set()
+        pending: set[str] = set()
+        snapshots: list[dict[str, Any]] = []
+        for record in records:
+            for key in ("environment_ref", "session_ref"):
+                value = record.get(key)
+                if value:
+                    pending.add(str(value))
+        while pending:
+            batch = sorted(pending - snapshot_ids)
+            if not batch:
+                break
+            snapshot_ids.update(batch)
+            fetched = self.store.query_snapshots_by_ids(batch)
+            snapshots.extend(fetched)
+            pending = set()
+            for snapshot in fetched:
+                for key in ("environment_ref", "session_ref"):
+                    value = snapshot.get(key)
+                    if value and str(value) not in snapshot_ids:
+                        pending.add(str(value))
+        return snapshots
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/auth/login":
@@ -683,13 +735,7 @@ class WorklogHandler(BaseHTTPRequestHandler):
                 session_id=session_id,
             )
             if session_id:
-                snapshot_ids: list[str] = []
-                for event in records:
-                    for key in ("environment_ref", "session_ref"):
-                        value = event.get(key)
-                        if value:
-                            snapshot_ids.append(str(value))
-                snapshots = self.store.query_snapshots_by_ids(snapshot_ids)
+                snapshots = self.related_snapshots(records)
                 records = [*records, *transcript_apply_patch_events(session_id, records, snapshots)]
             write_json(self, HTTPStatus.OK, compute_code_metrics(records))
             return
@@ -733,14 +779,14 @@ class WorklogHandler(BaseHTTPRequestHandler):
                 surface=surface,
                 limit=limit,
             )
-            snapshot_ids: list[str] = []
-            for event in records:
-                for key in ("environment_ref", "session_ref"):
-                    value = event.get(key)
-                    if value:
-                        snapshot_ids.append(str(value))
-            snapshots = self.store.query_snapshots_by_ids(snapshot_ids)
-            payload = build_sessions_index(records, limit=limit, snapshot_records=snapshots, total_sessions=total_sessions)
+            snapshots = self.related_snapshots(records)
+            payload = build_sessions_index(
+                records,
+                limit=limit,
+                snapshot_records=snapshots,
+                total_sessions=total_sessions,
+                identity_mappings=self.store.identity_mappings(),
+            )
             with handler_cls.sessions_cache_lock:
                 handler_cls.sessions_cache = {
                     key: value
@@ -761,14 +807,18 @@ class WorklogHandler(BaseHTTPRequestHandler):
             surface = (query.get("surface") or [None])[0]
             query_session_id = None if session_id == "unknown" else session_id
             events = self.store.query_events_for_analysis(surface=surface, session_id=query_session_id)
-            snapshot_ids: list[str] = []
-            for event in events:
-                for key in ("environment_ref", "session_ref"):
-                    value = event.get(key)
-                    if value:
-                        snapshot_ids.append(str(value))
-            snapshots = self.store.query_snapshots_by_ids(snapshot_ids)
-            write_json(self, HTTPStatus.OK, build_session_detail(session_id, events, snapshots, limit=limit))
+            snapshots = self.related_snapshots(events)
+            write_json(
+                self,
+                HTTPStatus.OK,
+                build_session_detail(
+                    session_id,
+                    events,
+                    snapshots,
+                    limit=limit,
+                    identity_mappings=self.store.identity_mappings(),
+                ),
+            )
             return
 
         if parsed.path == "/records":

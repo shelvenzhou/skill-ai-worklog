@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .metrics import compute_code_metrics
-from .storage import session_models, token_totals, token_totals_by_model
+from .storage import session_models, session_user_summary, token_totals, token_totals_by_model
 from .trellis import infer_trellis_session
 
 
@@ -431,6 +431,8 @@ def summarize_session_records(
     records: list[dict[str, Any]],
     code_metrics_by_session: dict[str, Any] | None = None,
     model_by_session: dict[str, str] | None = None,
+    snapshot_records: list[dict[str, Any]] | None = None,
+    identity_mappings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     ordered = sorted(records, key=record_time)
     hook_counts = Counter(str(record.get("hook_event_name") or "unknown") for record in ordered)
@@ -455,6 +457,7 @@ def summarize_session_records(
         "event_count": len(ordered),
         "hook_event_counts": dict(sorted(hook_counts.items())),
         "collection_levels": collection_levels,
+        "user": session_user_summary(session_id, ordered, snapshot_records, identity_mappings),
         "token_totals": token_totals(ordered),
         "token_totals_by_model": token_totals_by_model(ordered, model_by_session),
         "process": process_summary(ordered),
@@ -480,6 +483,7 @@ def build_sessions_index(
     limit: int = 50,
     snapshot_records: list[dict[str, Any]] | None = None,
     total_sessions: int | None = None,
+    identity_mappings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     event_records = [record for record in records if record.get("record_type") == "event"]
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -495,7 +499,14 @@ def build_sessions_index(
     code_metrics = compute_code_metrics(metric_records)
     model_by_session = session_models([*event_records, *(snapshot_records or [])])
     summaries = [
-        summarize_session_records(session_id, session_records, code_metrics.get("by_session", {}), model_by_session)
+        summarize_session_records(
+            session_id,
+            session_records,
+            code_metrics.get("by_session", {}),
+            model_by_session,
+            snapshot_records,
+            identity_mappings,
+        )
         for session_id, session_records in grouped.items()
     ]
     summaries.sort(key=lambda item: str(item.get("last_seen") or ""), reverse=True)
@@ -529,6 +540,7 @@ def build_session_detail(
     snapshot_records: list[dict[str, Any]],
     *,
     limit: int = 200,
+    identity_mappings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     matching_events = [record for record in event_records if session_key(record) == session_id]
     ordered = sorted(matching_events, key=record_time)
@@ -536,7 +548,14 @@ def build_session_detail(
     metric_records = sorted([*ordered, *transcript_tool_events], key=record_time)
     code_metrics = compute_code_metrics(metric_records)
     model_by_session = session_models([*ordered, *snapshot_records])
-    summary = summarize_session_records(session_id, ordered, code_metrics.get("by_session", {}), model_by_session)
+    summary = summarize_session_records(
+        session_id,
+        ordered,
+        code_metrics.get("by_session", {}),
+        model_by_session,
+        snapshot_records,
+        identity_mappings,
+    )
     bounded_limit = max(1, min(int(limit), 1000))
     assistant_messages = transcript_agent_messages(session_id, snapshot_records)
     visible_events = ordered[-bounded_limit:]

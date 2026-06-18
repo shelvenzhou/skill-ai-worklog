@@ -545,7 +545,7 @@ class SessionAnalysisTests(unittest.TestCase):
                 "record_type": "snapshot",
                 "snapshot_id": "sess1",
                 "snapshot_type": "session",
-                "session": {"session_id": "s1", "model": "gpt-test"},
+                "session": {"session_id": "s1", "model": "gpt-test", "user_email": "dev@example.com"},
             },
         ]
 
@@ -559,6 +559,8 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(s1["code_metrics"]["uncommitted_code"]["additions"], 2)
         self.assertEqual(s1["token_totals"]["total_tokens"], 3)
         self.assertEqual(s1["token_totals_by_model"]["gpt-test"]["total_tokens"], 3)
+        self.assertEqual(s1["user"]["user_email"], "dev@example.com")
+        self.assertTrue(s1["user"]["claimed"])
         self.assertEqual(s1["process"]["operation_category_counts"]["tool"], 1)
         self.assertEqual(s1["process"]["tool_counts"]["apply_patch"], 1)
         self.assertEqual(s1["process"]["skill_counts"]["code-fix"], 1)
@@ -570,6 +572,7 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["code_metrics"]["generated_code"]["additions"], 2)
         self.assertEqual(detail["code_metrics"]["uncommitted_code"]["additions"], 2)
         self.assertEqual(detail["session"]["token_totals_by_model"]["gpt-test"]["total_tokens"], 3)
+        self.assertEqual(detail["session"]["user"]["identity_source"], "user_email")
         self.assertEqual([event["event_id"] for event in detail["events"]], ["e1", "e2"])
         self.assertEqual(detail["timeline"][0]["category"], "tool")
         self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")
@@ -923,9 +926,9 @@ class AppEndpointTests(unittest.TestCase):
                         "timeline": {"trace_id": "s1", "span_id": "e1", "sequence_no": 1, "duration_ms": 5},
                         "operation": {"category": "tool", "phase": "after", "name": "PostToolUse", "success": True},
                         "tool": {"name": "apply_patch", "files_written": ["src/app.py"]},
-                        "environment_ref": "env1",
                         "session_ref": "sess1",
                         "content": {"tool_input": "*** Begin Patch\n*** Add File: src/app.py\n+print(1)\n*** End Patch\n"},
+                        "hook_usage": {"last_token_usage": {"input_tokens": 8, "cached_input_tokens": 3, "output_tokens": 5, "reasoning_output_tokens": 2, "total_tokens": 13}},
                     },
                     {
                         "record_type": "event",
@@ -936,12 +939,22 @@ class AppEndpointTests(unittest.TestCase):
                         "hook_event_name": "Stop",
                         "timeline": {"trace_id": "s1", "span_id": "e2", "sequence_no": 2},
                         "operation": {"category": "session", "phase": "stop", "name": "Stop", "success": True},
-                        "environment_ref": "env1",
                         "session_ref": "sess1",
                         "workspace_diff": {"files": [{"path": "src/app.py", "additions": 1, "deletions": 0, "is_code": True}]},
                     },
-                    {"record_type": "snapshot", "snapshot_id": "env1", "snapshot_type": "environment"},
-                    {"record_type": "snapshot", "snapshot_id": "sess1", "snapshot_type": "session"},
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "env1",
+                        "snapshot_type": "environment",
+                        "environment": {"identity": {"git_user_email": "dev@example.com"}},
+                    },
+                    {
+                        "record_type": "snapshot",
+                        "snapshot_id": "sess1",
+                        "snapshot_type": "session",
+                        "environment_ref": "env1",
+                        "session": {"session_id": "s1", "model": "gpt-test"},
+                    },
                 ]
                 request = urllib.request.Request(
                     f"{base_url}/events",
@@ -969,12 +982,18 @@ class AppEndpointTests(unittest.TestCase):
                 self.assertEqual(sessions["sessions"][0]["code_metrics"]["generated_code"]["additions"], 1)
                 self.assertEqual(sessions["sessions"][0]["code_metrics"]["uncommitted_code"]["additions"], 1)
                 self.assertEqual(sessions["sessions"][0]["process"]["tool_counts"]["apply_patch"], 1)
+                self.assertEqual(sessions["sessions"][0]["user"]["user_email"], "dev@example.com")
+                self.assertEqual(sessions["sessions"][0]["token_totals"]["total_tokens"], 13)
+                self.assertEqual(sessions["sessions"][0]["token_totals"]["cached_input_tokens"], 3)
+                self.assertEqual(sessions["sessions"][0]["token_totals_by_model"]["gpt-test"]["total_tokens"], 13)
 
                 with urllib.request.urlopen(f"{base_url}/sessions/s1", timeout=5) as response:
                     detail = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(detail["event_count"], 2)
                 self.assertEqual(detail["snapshots"]["environment"][0]["snapshot_id"], "env1")
                 self.assertEqual(detail["timeline"][0]["tool"]["name"], "apply_patch")
+                self.assertEqual(detail["session"]["user"]["user_email"], "dev@example.com")
+                self.assertEqual(detail["session"]["token_totals"]["total_tokens"], 13)
 
                 with urllib.request.urlopen(f"{base_url}/metrics/code", timeout=5) as response:
                     metrics = json.loads(response.read().decode("utf-8"))
