@@ -247,13 +247,55 @@ DASHBOARD_HTML = r"""<!doctype html>
     .detail { min-width: 0; }
     .summary {
       display: grid;
-      grid-template-columns: repeat(5, minmax(110px, 1fr));
+      grid-template-columns: repeat(4, minmax(160px, 1fr));
       gap: 8px;
       padding: 12px;
       border-bottom: 1px solid var(--line);
     }
     .mini { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
     .mini strong { display: block; margin-top: 6px; font-size: 16px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .summary-card {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      min-width: 0;
+    }
+    .summary-card summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      cursor: pointer;
+      list-style: none;
+    }
+    .summary-card summary::-webkit-details-marker { display: none; }
+    .summary-card .summary-value {
+      margin-top: 6px;
+      font-size: 18px;
+      line-height: 1.15;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+    .summary-card .chevron { color: var(--muted); font-size: 12px; line-height: 1.2; }
+    .summary-card[open] .chevron { transform: rotate(90deg); }
+    .summary-rows {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px solid var(--line);
+    }
+    .summary-row { min-width: 0; }
+    .summary-row div:last-child {
+      margin-top: 3px;
+      font-size: 12px;
+      font-weight: 650;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
     .config {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -506,18 +548,26 @@ DASHBOARD_HTML = r"""<!doctype html>
       const latestCommit = session.code_metrics?.latest_git_commit_code || {};
       const tokens = session.token_totals || {};
       $("summary").replaceChildren(
-        mini("user", userLabel(session.user)),
-        mini("tokens", fmt.format(tokenValue(tokens, "total_tokens"))),
-        mini("input", fmt.format(tokenValue(tokens, "input_tokens"))),
-        mini("cached", fmt.format(tokenValue(tokens, "cached_input_tokens"))),
-        mini("output", fmt.format(tokenValue(tokens, "output_tokens"))),
-        mini("reasoning", fmt.format(tokenValue(tokens, "reasoning_output_tokens"))),
-        mini("events", session.event_count || 0),
-        mini("tools", count(proc.operation_category_counts, "tool")),
-        mini("generated", `${generated.additions || 0}+ / ${generated.files || 0} files`),
-        mini("adopted", `${adopted.additions || 0}+ / ${adopted.files || 0} files`),
-        mini("latest commit", `${latestCommit.additions || 0}+ / ${latestCommit.files || 0} files`),
-        mini("uncommitted", `${uncommitted.additions || 0}+ / ${uncommitted.files || 0} files`),
+        summaryCard("user", userLabel(session.user), [
+          ["identity", identityLabel(session.user)],
+          ["surface", (session.surfaces || ["unknown"]).join(",")],
+        ]),
+        summaryCard("tokens", fmt.format(tokenValue(tokens, "total_tokens")), [
+          ["input", fmt.format(tokenValue(tokens, "input_tokens"))],
+          ["cached", fmt.format(tokenValue(tokens, "cached_input_tokens"))],
+          ["output", fmt.format(tokenValue(tokens, "output_tokens"))],
+          ["reasoning", fmt.format(tokenValue(tokens, "reasoning_output_tokens"))],
+        ]),
+        summaryCard("activity", `${session.event_count || 0} events`, [
+          ["tools", fmt.format(count(proc.operation_category_counts, "tool"))],
+          ["failures", fmt.format(proc.failure_count || 0)],
+        ]),
+        summaryCard("code", `${uncommitted.additions || 0}+ uncommitted`, [
+          ["generated", `${generated.additions || 0}+ / ${generated.files || 0} files`],
+          ["adopted", `${adopted.additions || 0}+ / ${adopted.files || 0} files`],
+          ["latest commit", `${latestCommit.additions || 0}+ / ${latestCommit.files || 0} files`],
+          ["uncommitted", `${uncommitted.additions || 0}+ / ${uncommitted.files || 0} files`],
+        ]),
       );
       renderConfig(detail.snapshots || {}, session.code_metrics || {});
       const timelineRecords = [...(detail.events || []), ...(detail.transcript_tool_events || []), ...(detail.assistant_messages || [])]
@@ -533,6 +583,44 @@ DASHBOARD_HTML = r"""<!doctype html>
       const v = document.createElement("strong");
       v.textContent = compact(value);
       el.append(l, v);
+      return el;
+    }
+    function summaryCard(label, value, rows = []) {
+      const el = document.createElement(rows.length ? "details" : "div");
+      el.className = "summary-card";
+      const head = document.createElement(rows.length ? "summary" : "div");
+      const body = document.createElement("div");
+      const l = document.createElement("div");
+      l.className = "label";
+      l.textContent = label;
+      const v = document.createElement("div");
+      v.className = "summary-value";
+      v.textContent = compact(value);
+      body.append(l, v);
+      head.append(body);
+      if (rows.length) {
+        const chevron = document.createElement("span");
+        chevron.className = "chevron";
+        chevron.textContent = ">";
+        head.append(chevron);
+      }
+      el.append(head);
+      if (rows.length) {
+        const rowRoot = document.createElement("div");
+        rowRoot.className = "summary-rows";
+        rowRoot.replaceChildren(...rows.map(([rowLabel, rowValue]) => {
+          const item = document.createElement("div");
+          item.className = "summary-row";
+          const rowLabelEl = document.createElement("div");
+          rowLabelEl.className = "label";
+          rowLabelEl.textContent = rowLabel;
+          const rowValueEl = document.createElement("div");
+          rowValueEl.textContent = compact(rowValue);
+          item.append(rowLabelEl, rowValueEl);
+          return item;
+        }));
+        el.append(rowRoot);
+      }
       return el;
     }
     function configItem(label, value) {
