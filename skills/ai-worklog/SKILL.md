@@ -11,6 +11,16 @@ Install a local worklog that turns Codex and Cursor hook events into structured 
 
 The default internal mode is `full`, which records prompt text, agent responses exposed to hooks, tool inputs/results, compact environment/session snapshots, and best-effort token usage from Codex transcripts. Use `diagnostic`, `basic`, or `off` when the user asks to reduce collection.
 
+## Completion Contract
+
+Treat ai-worklog installation as incomplete until all deterministic steps have run:
+
+1. The skill files exist under the target skill directory.
+2. `scripts/install.py` has run for the requested surface and written hook config.
+3. `scripts/doctor.py` has run and reported whether the install is usable.
+
+Generic skill installation only copies files. It does not prove that hooks were injected. If the user asks an agent to "install ai-worklog" or invokes `/ai-worklog`, continue past file installation and run the installer plus doctor. Do not report success just because `skill-installer` completed.
+
 ## Install
 
 If this skill is not installed yet and the user points to GitHub, install the skill directory, not the repository root:
@@ -30,12 +40,26 @@ Default local-only install:
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
 ```
 
+Then verify from the same client machine:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
+```
+
 Windows Cursor install:
 
 ```powershell
 $installer = "$HOME\.codex\skills\ai-worklog\scripts\install.py"
 if (!(Test-Path $installer)) { $installer = "$HOME\.cursor\skills\ai-worklog\scripts\install.py" }
 python $installer --surface cursor --level full
+```
+
+Then verify Cursor:
+
+```powershell
+$doctor = "$HOME\.codex\skills\ai-worklog\scripts\doctor.py"
+if (!(Test-Path $doctor)) { $doctor = "$HOME\.cursor\skills\ai-worklog\scripts\doctor.py" }
+python $doctor --surface cursor
 ```
 
 Company-internal install with upload:
@@ -235,7 +259,7 @@ python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --smoke-writ
 After publishing this skill internally, teammates should only need:
 
 ```text
-请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog，然后运行 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
+请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog。安装 skill 文件后不要停，继续运行 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full，然后运行 python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both。只有 doctor 显示 hooks 已写入并可用，才算安装完成。
 ```
 
 Add `--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY` only when upload to a known collector is required.

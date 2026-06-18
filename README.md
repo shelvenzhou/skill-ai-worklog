@@ -9,12 +9,16 @@ The default rollout mode is intentionally rich: `--level full` records prompts, 
 
 ## Install
 
-For teammate installs, give the agent the installable skill directory, not the repository root:
+For teammate installs, give the agent the installable skill directory, not the repository root. Copying the skill files is only the first step; the install is not complete until the deterministic installer writes hooks and doctor verifies them:
 
 ```text
-请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog，然后运行：
+请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog。安装 skill 文件后不要停，继续运行：
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
+只有 doctor 显示 hooks 已写入并可用，才算安装完成。
 ```
+
+In Cursor, `/ai-worklog` is a skill/agent trigger that should run the same post-install contract. A generic natural-language "install skills" request may only copy files, so prefer the explicit commands above when validating a client machine.
 
 Add upload only when a real collector is available:
 
