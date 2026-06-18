@@ -18,7 +18,7 @@ from .trellis import infer_trellis_metrics
 
 
 def parse_records(body: bytes, content_type: str) -> list[dict[str, Any]]:
-    text = body.decode("utf-8")
+    text = body.decode("utf-8-sig")
     if not text.strip():
         return []
 
@@ -50,7 +50,7 @@ def parse_records(body: bytes, content_type: str) -> list[dict[str, Any]]:
 
 
 def parse_record_pks(body: bytes) -> list[str]:
-    text = body.decode("utf-8")
+    text = body.decode("utf-8-sig")
     if not text.strip():
         return []
     item = json.loads(text)

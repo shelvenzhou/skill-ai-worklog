@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import journal
+import platform_io
 
 DEFAULT_LOCK_WAIT_SECONDS = 30
 
@@ -126,7 +127,7 @@ def should_run(cfg: dict[str, Any], now: float | None = None) -> bool:
     if not path.exists():
         return True
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(platform_io.read_text(path, encoding="utf-8-sig"))
         last_started = float(data.get("last_started_epoch") or 0)
     except Exception:
         last_started = path.stat().st_mtime
@@ -165,7 +166,7 @@ def mark_started(path: Path) -> None:
         "last_started_at": journal.utc_now(),
         "last_started_epoch": time.time(),
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    platform_io.write_text(path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def run_upload(config_path: Path, cfg: dict[str, Any]) -> int:
@@ -193,6 +194,7 @@ def run_upload(config_path: Path, cfg: dict[str, Any]) -> int:
                 stdout=fh,
                 stderr=fh,
                 check=False,
+                env=platform_io.utf8_subprocess_env(),
                 timeout=max_runtime_seconds(cfg),
             )
         except subprocess.TimeoutExpired:
@@ -203,6 +205,7 @@ def run_upload(config_path: Path, cfg: dict[str, Any]) -> int:
 
 
 def main() -> int:
+    platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Trigger AI Worklog background upload replay.")
     parser.add_argument("--config", default=os.environ.get("AI_WORKLOG_CONFIG") or str(journal.DEFAULT_CONFIG_PATH))
     args = parser.parse_args()

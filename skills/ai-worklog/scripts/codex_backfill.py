@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import journal
+import platform_io
 import replay
 
 
@@ -170,7 +171,7 @@ class BackfillLedger:
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig") as fh:
         for line_no, line in enumerate(fh, start=1):
             if not line.strip():
                 continue
@@ -511,6 +512,7 @@ def update_type_counts(target: dict[str, int], records: list[dict[str, Any]]) ->
 
 
 def main() -> int:
+    platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Backfill Codex ~/.codex/sessions transcript JSONL files.")
     parser.add_argument("--sessions-root", default=str(Path.home() / ".codex" / "sessions"))
     parser.add_argument("--config", default=os.environ.get("AI_WORKLOG_CONFIG") or str(journal.DEFAULT_CONFIG_PATH))

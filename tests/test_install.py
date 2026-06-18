@@ -73,6 +73,11 @@ class InstallScriptTests(unittest.TestCase):
             self.assertNotIn("/bin/sh", command)
             self.assertIn("if not exist", content)
             self.assertIn("journal.py", content)
+            self.assertIn("PYTHONUTF8=1", content)
+            self.assertIn("PYTHONIOENCODING=utf-8", content)
+            self.assertIn("AI_WORKLOG_PYTHON", content)
+            self.assertNotIn("uv run", content)
+            self.assertIn("runtime.log", content)
             self.assertIn("--surface \"codex\"", content)
 
             try:

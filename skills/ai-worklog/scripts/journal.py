@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import platform_io
 import skill_release
 
 VERSION = skill_release.VERSION
@@ -126,7 +127,7 @@ def load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(platform_io.read_text(path, encoding="utf-8-sig"))
     except Exception:
         return {}
 
@@ -507,15 +508,7 @@ def skill_metadata(payload: dict[str, Any], operation: dict[str, Any]) -> dict[s
 
 def run_metadata_command(args: list[str], cwd: str | None = None, timeout: float = 1.5) -> str | None:
     try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=timeout,
-        )
+        result = platform_io.run_capture_text(args, cwd=cwd, timeout=timeout)
     except Exception:
         return None
     if result.returncode != 0:
@@ -626,17 +619,9 @@ def git_workspace_diff(cwd: str | None) -> dict[str, Any] | None:
     if not path.exists():
         return None
 
-    def run_git(args: list[str]) -> subprocess.CompletedProcess[str] | None:
+    def run_git(args: list[str]) -> platform_io.TextCompletedProcess | None:
         try:
-            result = subprocess.run(
-                ["git", *args],
-                cwd=str(path),
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=3.0,
-            )
+            result = platform_io.run_capture_text(["git", *args], cwd=str(path), timeout=3.0)
         except Exception:
             return None
         return result if result.returncode == 0 else None
@@ -952,7 +937,7 @@ def append_jsonl(directory: Path, event: dict[str, Any]) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     day = dt.datetime.now().strftime("%Y-%m-%d")
     path = directory / f"{day}.jsonl"
-    with path.open("a", encoding="utf-8") as fh:
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json_dumps(event, ensure_ascii=False, sort_keys=True, default=str))
         fh.write("\n")
     return path
@@ -978,7 +963,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json_dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    platform_io.write_text(path, json_dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def write_new_snapshots(snapshots: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1133,6 +1118,7 @@ def maybe_spawn_async_upload(cfg: dict[str, Any], config_path: Path) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=platform_io.utf8_subprocess_env(),
             start_new_session=True,
         )
     except Exception:
@@ -1162,6 +1148,7 @@ def maybe_spawn_codex_backfill(payload: dict[str, Any], cfg: dict[str, Any], sur
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=platform_io.utf8_subprocess_env(),
             start_new_session=True,
         )
     except Exception:
@@ -1227,7 +1214,7 @@ def maybe_emit_skill_update_notice(payload: dict[str, Any], cfg: dict[str, Any])
         return
 
     try:
-        text = notice.read_text(encoding="utf-8").strip()
+        text = platform_io.read_text(notice, encoding="utf-8-sig").strip()
     except Exception:
         return
     if not text:
@@ -1258,6 +1245,7 @@ def maybe_spawn_skill_update_check(payload: dict[str, Any], cfg: dict[str, Any],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=platform_io.utf8_subprocess_env(),
             start_new_session=True,
         )
     except Exception:
@@ -1265,6 +1253,7 @@ def maybe_spawn_skill_update_check(payload: dict[str, Any], cfg: dict[str, Any],
 
 
 def main() -> int:
+    platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Record one Codex/Cursor hook event.")
     parser.add_argument("--surface", default="unknown", help="codex, cursor, or another source label")
     parser.add_argument("--config", default=os.environ.get("AI_WORKLOG_CONFIG") or os.environ.get("AI_USAGE_COLLECTOR_CONFIG") or str(DEFAULT_CONFIG_PATH))

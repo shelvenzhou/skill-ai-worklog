@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import journal
+import platform_io
 
 
 DEFAULT_TIMEOUT_SECONDS = 2.0
@@ -87,7 +88,7 @@ def should_run(cfg: dict[str, Any], force: bool = False, now: float | None = Non
     if not path.exists():
         return True
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(platform_io.read_text(path, encoding="utf-8-sig"))
         last_checked = float(data.get("last_checked_epoch") or 0)
     except Exception:
         last_checked = path.stat().st_mtime
@@ -97,7 +98,7 @@ def should_run(cfg: dict[str, Any], force: bool = False, now: float | None = Non
 def fetch_manifest(url: str, timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"Accept": "application/json,text/plain"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read().decode("utf-8")
+        body = platform_io.decode_text(response.read())
     try:
         value = json.loads(body)
     except json.JSONDecodeError:
@@ -160,12 +161,12 @@ def notice_text(cfg: dict[str, Any], manifest: dict[str, Any]) -> str:
 
 def write_state(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    platform_io.write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def write_notice(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text.rstrip() + "\n", encoding="utf-8")
+    platform_io.write_text(path, text.rstrip() + "\n")
 
 
 def clear_notice(path: Path) -> None:
@@ -220,6 +221,7 @@ def check(cfg: dict[str, Any], force: bool = False) -> dict[str, Any]:
 
 
 def main() -> int:
+    platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Check the remote AI Worklog skill version manifest.")
     parser.add_argument("--config", default=os.environ.get("AI_WORKLOG_CONFIG") or str(journal.DEFAULT_CONFIG_PATH))
     parser.add_argument("--force", action="store_true", help="Check now even if the throttle interval has not elapsed.")

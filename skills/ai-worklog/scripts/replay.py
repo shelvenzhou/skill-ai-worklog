@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import journal
+import platform_io
 
 
 FAILED_UPLOAD_KEYS = {"upload_error", "upload_failed_at"}
@@ -23,7 +24,7 @@ def iter_jsonl_records(directory: Path) -> Iterable[dict[str, Any]]:
     if not directory.exists():
         return
     for path in sorted(directory.glob("*.jsonl")):
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8-sig") as fh:
             for line_no, line in enumerate(fh, start=1):
                 if not line.strip():
                     continue
@@ -209,6 +210,7 @@ def replay(cfg: dict[str, Any], batch_size: int, *, force: bool = False) -> dict
 
 
 def main() -> int:
+    platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Replay local AI Worklog events, snapshots, and failed uploads.")
     parser.add_argument(
         "--config",

@@ -675,9 +675,9 @@ class WorklogStore:
                        reasoning_output_tokens, total_tokens, raw_json
                 from records
                 where token_usage_identity is not null
-                  and ingested_at >= ?
-                  and ingested_at < ?
-                order by ingested_at asc
+                  and coalesce(client_received_at, ingested_at) >= ?
+                  and coalesce(client_received_at, ingested_at) < ?
+                order by coalesce(client_received_at, ingested_at) asc
                 """,
                 (start, end),
             ).fetchall()
@@ -731,13 +731,13 @@ class WorklogStore:
             row: sqlite3.Row,
             candidates: list[dict[str, str]],
         ) -> tuple[str, dict[str, Any], bool]:
-            direct = direct_email_candidate(candidates)
-            if direct:
-                return direct["value"], {"user_email": direct["value"], "display_name": None, "source": direct["kind"]}, True
             for candidate in candidates:
                 mapping = mappings.get((candidate["kind"], candidate["value"]))
                 if mapping:
                     return str(mapping["user_email"]), mapping, True
+            direct = direct_email_candidate(candidates)
+            if direct:
+                return direct["value"], {"user_email": direct["value"], "display_name": None, "source": direct["kind"]}, True
             fallback = next((item for item in candidates if item["kind"] == "hostname"), None) or next(iter(candidates), None)
             if fallback:
                 key = f"{fallback['kind']}:{fallback['value']}"

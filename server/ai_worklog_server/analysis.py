@@ -275,6 +275,10 @@ def session_transcript_paths(snapshot_records: list[dict[str, Any]], session_id:
     return paths
 
 
+def transcript_lines(path: Path) -> list[str]:
+    return path.read_bytes().decode("utf-8-sig", errors="replace").splitlines()
+
+
 def transcript_agent_messages(
     session_id: str,
     snapshot_records: list[dict[str, Any]],
@@ -284,7 +288,7 @@ def transcript_agent_messages(
     messages: list[dict[str, Any]] = []
     for path in session_transcript_paths(snapshot_records, session_id):
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = transcript_lines(path)
         except OSError:
             continue
         for line in lines:
@@ -345,7 +349,7 @@ def transcript_apply_patch_events(
         calls: dict[str, dict[str, Any]] = {}
         results: dict[str, dict[str, Any]] = {}
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = transcript_lines(path)
         except OSError:
             continue
         for line in lines:

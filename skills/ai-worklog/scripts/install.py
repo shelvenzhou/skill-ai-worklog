@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import platform_io
 import skill_release
 
 SKILL_NAME = skill_release.NAME
@@ -89,7 +90,7 @@ def read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        value = json.loads(platform_io.read_text(path, encoding="utf-8-sig"))
     except Exception as exc:
         backup = path.with_suffix(path.suffix + ".bak")
         shutil.copy2(path, backup)
@@ -107,7 +108,7 @@ def write_json(path: Path, value: dict[str, Any], dry_run: bool) -> None:
     if path.exists():
         backup = path.with_suffix(path.suffix + ".bak")
         shutil.copy2(path, backup)
-    path.write_text(data + "\n", encoding="utf-8")
+    platform_io.write_text(path, data + "\n")
 
 
 def source_skill_dir() -> Path:
@@ -133,20 +134,69 @@ def cmd_file_literal(value: str) -> str:
     return value.replace("%", "%%")
 
 
+def windows_config_literal(path: Path) -> str:
+    expanded = path.expanduser()
+    try:
+        home = Path.home().resolve()
+        relative = expanded.resolve().relative_to(home)
+    except (NotImplementedError, OSError, RuntimeError, ValueError):
+        return cmd_file_literal(str(expanded))
+    parts = "\\".join(relative.parts)
+    return "%USERPROFILE%" + (f"\\{parts}" if parts else "")
+
+
+def windows_python_launcher_lines(python: str, script_args: str) -> str:
+    lines = []
+    lines.append('if defined AI_WORKLOG_PYTHON if exist "%AI_WORKLOG_PYTHON%" (\r\n')
+    lines.append(f'  "%AI_WORKLOG_PYTHON%" {script_args}\r\n')
+    lines.append("  if not errorlevel 1 exit /b 0\r\n")
+    lines.append(")\r\n")
+    if python.isascii():
+        lines.append(f'if exist "{cmd_file_literal(python)}" (\r\n')
+        lines.append(f'  "{cmd_file_literal(python)}" {script_args}\r\n')
+        lines.append("  if not errorlevel 1 exit /b 0\r\n")
+        lines.append(")\r\n")
+    lines.append("where py >nul 2>nul\r\n")
+    lines.append("if not errorlevel 1 (\r\n")
+    lines.append(f"  py -3 {script_args}\r\n")
+    lines.append("  if not errorlevel 1 exit /b 0\r\n")
+    lines.append(")\r\n")
+    lines.append("where python >nul 2>nul\r\n")
+    lines.append("if not errorlevel 1 (\r\n")
+    lines.append(f"  python {script_args}\r\n")
+    lines.append("  if not errorlevel 1 exit /b 0\r\n")
+    lines.append(")\r\n")
+    lines.append('set "AI_WORKLOG_ERROR_DIR=%USERPROFILE%\\.ai-worklog\\errors"\r\n')
+    lines.append('if not exist "%AI_WORKLOG_ERROR_DIR%" mkdir "%AI_WORKLOG_ERROR_DIR%" >nul 2>nul\r\n')
+    lines.append(
+        '>> "%AI_WORKLOG_ERROR_DIR%\\runtime.log" echo [%date% %time%] '
+        "No Python runtime found for ai-worklog Cursor hook. Set AI_WORKLOG_PYTHON or install Python.\r\n"
+    )
+    lines.append("exit /b 0\r\n")
+    return "".join(lines)
+
+
 def write_windows_hook_launcher(skill_dir: Path, surface: str, config_path: Path) -> Path:
-    journal = skill_dir / "scripts" / "journal.py"
     launcher = skill_dir / "scripts" / f"{SKILL_NAME}-hook-{surface}.cmd"
     python = sys.executable or "python"
     launcher.parent.mkdir(parents=True, exist_ok=True)
+    script_args = (
+        '"%AI_WORKLOG_SCRIPT%" '
+        f'--surface "{cmd_file_literal(surface)}" '
+        '--config "%AI_WORKLOG_CONFIG%" '
+        f'--source-id "{cmd_file_literal(SKILL_NAME)}"'
+    )
     content = (
         "@echo off\r\n"
-        f'if not exist "{cmd_file_literal(str(journal))}" exit /b 0\r\n'
-        f'"{cmd_file_literal(str(python))}" "{cmd_file_literal(str(journal))}" '
-        f'--surface "{cmd_file_literal(surface)}" '
-        f'--config "{cmd_file_literal(str(config_path))}" '
-        f'--source-id "{cmd_file_literal(SKILL_NAME)}"\r\n'
+        "setlocal\r\n"
+        "set \"PYTHONUTF8=1\"\r\n"
+        "set \"PYTHONIOENCODING=utf-8\"\r\n"
+        "set \"AI_WORKLOG_SCRIPT=%~dp0journal.py\"\r\n"
+        f"set \"AI_WORKLOG_CONFIG={windows_config_literal(config_path)}\"\r\n"
+        "if not exist \"%AI_WORKLOG_SCRIPT%\" exit /b 0\r\n"
+        f"{windows_python_launcher_lines(str(python), script_args)}"
     )
-    launcher.write_text(content, encoding="utf-8")
+    platform_io.write_text(launcher, content, newline="")
     return launcher
 
 
@@ -409,7 +459,7 @@ def set_toml_feature(text: str, key: str, value: str) -> str:
 
 def ensure_codex_hooks_feature(home: Path, dry_run: bool) -> None:
     config_path = home / "config.toml"
-    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    existing = platform_io.read_text(config_path, encoding="utf-8-sig") if config_path.exists() else ""
     updated = set_toml_feature(existing, "hooks", "true")
     if updated == existing:
         print(f"Codex hooks feature already enabled in {config_path}")
@@ -420,7 +470,7 @@ def ensure_codex_hooks_feature(home: Path, dry_run: bool) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if config_path.exists():
         shutil.copy2(config_path, config_path.with_suffix(config_path.suffix + ".bak"))
-    config_path.write_text(updated, encoding="utf-8")
+    platform_io.write_text(config_path, updated)
     print(f"Enabled Codex hooks feature in {config_path}")
 
 
@@ -468,7 +518,7 @@ def run_codex_backfill(args: argparse.Namespace, skill_dir: Path) -> None:
         print(" ".join(shell_quote(part) for part in command))
         return
     print("Running Codex historical session backfill...")
-    subprocess.run(command, check=True, timeout=args.backfill_max_runtime_seconds)
+    subprocess.run(command, check=True, env=platform_io.utf8_subprocess_env(), timeout=args.backfill_max_runtime_seconds)
 
 
 def uninstall_codex(args: argparse.Namespace) -> None:
@@ -520,6 +570,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Install or uninstall AI worklog hooks.")
     parser.add_argument("--surface", choices=["codex", "cursor", "both"], default="both")
     parser.add_argument("--level", choices=["full", "diagnostic", "basic", "off"], default="full")

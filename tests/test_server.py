@@ -38,6 +38,10 @@ class ParseRecordsTests(unittest.TestCase):
         self.assertEqual(parse_record_pks(b'{"record_pks":["event:e1"]}'), ["event:e1"])
         self.assertEqual(parse_record_pks(b'["snapshot:s1"]'), ["snapshot:s1"])
 
+    def test_parse_requests_accept_utf8_bom(self) -> None:
+        self.assertEqual(parse_records(b'\xef\xbb\xbf{"record_type":"event"}', "application/json")[0]["record_type"], "event")
+        self.assertEqual(parse_record_pks(b'\xef\xbb\xbf{"record_pks":["event:e1"]}'), ["event:e1"])
+
 
 class StoreTests(unittest.TestCase):
     def test_insert_indexes_and_deduplicates_records(self) -> None:
@@ -237,6 +241,37 @@ class StoreTests(unittest.TestCase):
             claimed = store.token_report()
             self.assertEqual({item["user_email"] for item in claimed["users"]}, {"deva@example.com", "devb@example.com"})
             self.assertEqual(claimed["unclaimed"], [])
+
+            store.upsert_identity_mapping(identity_kind="git_email", identity_value="DevA@Example.com", user_email="team-a@example.com")
+            remapped = store.token_report()
+            self.assertIn("team-a@example.com", {item["user_email"] for item in remapped["users"]})
+            self.assertNotIn("deva@example.com", {item["user_email"] for item in remapped["users"]})
+
+    def test_token_report_month_uses_event_time_not_ingestion_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorklogStore(Path(tmp))
+            store.insert_many(
+                [
+                    {
+                        "record_type": "event",
+                        "event_id": "historical",
+                        "received_at": "2026-05-15T12:00:00Z",
+                        "session_id": "s1",
+                        "user_email": "dev@example.com",
+                        "model": "gpt-test",
+                        "usage": {
+                            "timestamp": "turn1",
+                            "info": {"last_token_usage": {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10}},
+                        },
+                    },
+                ]
+            )
+
+            may = store.token_report("2026-05")
+            june = store.token_report("2026-06")
+
+            self.assertEqual(may["token_totals"]["total_tokens"], 10)
+            self.assertEqual(june["token_totals"]["total_tokens"], 0)
 
     def test_queries_events_and_snapshots_for_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,10 +17,26 @@ import journal
 import async_upload_trigger
 import codex_backfill
 import codex_backfill_trigger
+import platform_io
 import replay
 
 
 class JournalTests(unittest.TestCase):
+    def test_platform_decode_text_accepts_windows_code_page_fallback(self) -> None:
+        original_os_name = platform_io.os.name
+        try:
+            platform_io.os.name = "nt"
+            self.assertEqual(platform_io.decode_text("中文路径".encode("gb18030")), "中文路径")
+        finally:
+            platform_io.os.name = original_os_name
+
+    def test_load_json_accepts_utf8_bom_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"enabled": False}) + "\n", encoding="utf-8-sig")
+
+            self.assertEqual(journal.load_json(path), {"enabled": False})
+
     def test_read_stdin_json_decodes_utf8_bytes_independent_of_locale(self) -> None:
         class BinaryStdin:
             def __init__(self, data: bytes) -> None:

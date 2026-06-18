@@ -52,6 +52,16 @@ Local checkout install for development:
 python3 skills/ai-worklog/scripts/install.py --surface both --level full --server-url http://127.0.0.1:8765/events
 ```
 
+Cursor on Windows does not provide a bundled Python runtime. Run the installer from an environment that has Python available, then restart Cursor after hooks are written. The installer records that Python path into the Windows hook launcher:
+
+```powershell
+$installer = "$HOME\.codex\skills\ai-worklog\scripts\install.py"
+if (!(Test-Path $installer)) { $installer = "$HOME\.cursor\skills\ai-worklog\scripts\install.py" }
+python $installer --surface cursor --level full
+```
+
+The installed Windows hook launcher tries `AI_WORKLOG_PYTHON`, the install-time Python path, `py -3`, then `python`. If none are available, it writes `~/.ai-worklog/errors/runtime.log` and exits successfully so Cursor is not blocked by observability.
+
 Reduce or stop collection:
 
 ```bash
@@ -117,6 +127,12 @@ Backfill historical Codex transcripts:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/codex_backfill.py --sessions-root ~/.codex/sessions --server-url http://127.0.0.1:8765/events --batch-size 250
+```
+
+Backfill historical Cursor agent transcripts:
+
+```bash
+python3 ~/.cursor/skills/ai-worklog/scripts/cursor_backfill.py --config ~/.ai-worklog/config.json --upload
 ```
 
 When `server_url` is configured, hook events trigger background replay uploads at most once per minute by default, so collector/network failures do not block Codex or Cursor execution. Installed Codex `SessionStart` hooks also trigger background history backfill automatically unless installed with `--no-auto-codex-backfill`. Add `--backfill-codex-history` to `install.py` only when the first history upload should run immediately during installation.

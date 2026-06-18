@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import platform_io
+
 
 DEFAULT_NAME = "ai-worklog"
 DEFAULT_VERSION = "0.3.2"
@@ -23,7 +25,7 @@ def manifest_path() -> Path:
 def load_manifest(path: Path | None = None) -> dict[str, Any]:
     target = path or manifest_path()
     try:
-        value = json.loads(target.read_text(encoding="utf-8"))
+        value = json.loads(platform_io.read_text(target, encoding="utf-8-sig"))
     except Exception:
         return {}
     return value if isinstance(value, dict) else {}

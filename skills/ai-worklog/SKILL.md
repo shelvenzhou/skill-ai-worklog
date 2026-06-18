@@ -22,12 +22,20 @@ If this skill is not installed yet and the user points to GitHub, install the sk
 
 Do not pass the bare repository URL to `skill-installer --url`; it requires `--path` for this repository. Do not assume the branch is `main`.
 
-Run scripts with `python3`; executable bits may not survive GitHub install. If `~/.codex/skills/ai-worklog` already exists, skip copying and run its installer directly.
+Run scripts with `python3`; executable bits may not survive GitHub install. If `~/.codex/skills/ai-worklog` already exists, skip copying and run its installer directly. On Windows Cursor hosts, run the installer from an environment that has Python available because Cursor does not provide a bundled Python runtime.
 
 Default local-only install:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
+```
+
+Windows Cursor install:
+
+```powershell
+$installer = "$HOME\.codex\skills\ai-worklog\scripts\install.py"
+if (!(Test-Path $installer)) { $installer = "$HOME\.cursor\skills\ai-worklog\scripts\install.py" }
+python $installer --surface cursor --level full
 ```
 
 Company-internal install with upload:
@@ -81,6 +89,8 @@ For local development from the repository checkout, use `python3 skills/ai-workl
 - Writes event, snapshot, failed-upload, async-upload, replay, Codex-backfill, and skill-update state under `~/.ai-worklog`.
 
 Hook commands are guarded: if `journal.py` has already been deleted, installed hooks no-op instead of failing. Still prefer `--uninstall` before deleting the skill so stale hook entries are removed.
+
+On Windows, the Cursor hook launcher tries `AI_WORKLOG_PYTHON`, the install-time Python path, `py -3`, then `python`. If no runtime exists, it writes `~/.ai-worklog/errors/runtime.log` and exits successfully so the host agent is not blocked.
 
 ## Collection Levels
 
@@ -163,6 +173,14 @@ python3 ~/.codex/skills/ai-worklog/scripts/codex_backfill.py --sessions-root ~/.
 ```
 
 Use `--dry-run` first for a count-only pass. Use `--force` when the local upload ledger may be stale and the collector should deduplicate again. Disable automatic Codex backfill only when required:
+
+Backfill existing Cursor agent transcripts:
+
+```bash
+python3 ~/.cursor/skills/ai-worklog/scripts/cursor_backfill.py --config ~/.ai-worklog/config.json --upload
+```
+
+Use `--dry-run` first for a count-only pass. Cursor backfill reads `~/.cursor/projects/**/agent-transcripts/**/*.jsonl`, writes stable event IDs into local worklog JSONL, and skips existing events on repeated runs.
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --no-auto-codex-backfill
