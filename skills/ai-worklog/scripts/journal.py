@@ -1100,6 +1100,8 @@ def auto_codex_backfill_enabled(cfg: dict[str, Any]) -> bool:
 
 
 def async_upload_enabled(cfg: dict[str, Any]) -> bool:
+    if os.environ.get("AI_WORKLOG_DISABLE_BACKGROUND"):
+        return False
     section = cfg.get("async_upload")
     if isinstance(section, dict) and section.get("enabled") is False:
         return False
@@ -1126,6 +1128,8 @@ def maybe_spawn_async_upload(cfg: dict[str, Any], config_path: Path) -> None:
 
 
 def maybe_spawn_codex_backfill(payload: dict[str, Any], cfg: dict[str, Any], surface: str, config_path: Path) -> None:
+    if os.environ.get("AI_WORKLOG_DISABLE_BACKGROUND"):
+        return
     hook_event_name = str(
         value_at(payload, "hook_event_name", "event", "event_name", "hookName")
         or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
@@ -1229,6 +1233,8 @@ def maybe_emit_skill_update_notice(payload: dict[str, Any], cfg: dict[str, Any])
 
 
 def maybe_spawn_skill_update_check(payload: dict[str, Any], cfg: dict[str, Any], config_path: Path) -> None:
+    if os.environ.get("AI_WORKLOG_DISABLE_BACKGROUND"):
+        return
     hook_event_name = str(
         value_at(payload, "hook_event_name", "event", "event_name", "hookName")
         or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
@@ -1264,7 +1270,8 @@ def main() -> int:
     cfg = merged_config(config_path)
     payload = read_stdin_json()
     maybe_emit_skill_update_notice(payload, cfg)
-    event, snapshots = build_records(payload, cfg, args.surface, args.source_id)
+    source_id = os.environ.get("AI_WORKLOG_SOURCE_ID") or args.source_id
+    event, snapshots = build_records(payload, cfg, args.surface, source_id)
     if event is None:
         return 0
     assign_event_sequence(event, cfg)

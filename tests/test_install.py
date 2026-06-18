@@ -216,6 +216,86 @@ class InstallScriptTests(unittest.TestCase):
             self.assertTrue(cfg["uninstalled"])
             self.assertEqual(cfg["local_log_dir"], "/tmp/events")
 
+    def test_replace_skill_repairs_acl_after_move(self) -> None:
+        installer = load_installer()
+        calls: list[Path] = []
+
+        class FakePlatform:
+            def repair_skill_acl(self, path: Path) -> tuple[bool, str]:
+                calls.append(path)
+                return True, "ok"
+
+        def make_skill(path: Path) -> None:
+            (path / "scripts").mkdir(parents=True)
+            (path / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            (path / "skill-version.json").write_text("{}\n", encoding="utf-8")
+            (path / "scripts" / "journal.py").write_text("# journal\n", encoding="utf-8")
+            (path / "scripts" / "install.py").write_text("# install\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            dest = root / "dest"
+            make_skill(src)
+            make_skill(dest)
+            original_current_platform = installer.platforms.current_platform
+            original_config_home = installer.CONFIG_HOME
+            try:
+                installer.platforms.current_platform = lambda: FakePlatform()
+                installer.CONFIG_HOME = root / "home"
+                installer.replace_skill_from_source(src, dest, dry_run=False, label="codex")
+            finally:
+                installer.platforms.current_platform = original_current_platform
+                installer.CONFIG_HOME = original_config_home
+
+            self.assertEqual(calls, [dest])
+            self.assertTrue((root / "home" / "backups" / "skills").exists())
+
+    def test_codex_install_uses_hooks_json_and_removes_stale_inline_block(self) -> None:
+        installer = load_installer()
+
+        def make_skill(path: Path) -> None:
+            (path / "scripts").mkdir(parents=True)
+            (path / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            (path / "skill-version.json").write_text("{}\n", encoding="utf-8")
+            (path / "scripts" / "journal.py").write_text("# journal\n", encoding="utf-8")
+            (path / "scripts" / "install.py").write_text("# install\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_home = root / "codex"
+            skill_src = root / "src"
+            make_skill(skill_src)
+            config_toml = codex_home / "config.toml"
+            config_toml.parent.mkdir(parents=True)
+            config_toml.write_text(
+                "[features]\n"
+                "hooks = false\n\n"
+                "# BEGIN AI_WORKLOG_HOOKS\n"
+                "old = true\n"
+                "# END AI_WORKLOG_HOOKS\n",
+                encoding="utf-8",
+            )
+            old_source_skill_dir = installer.source_skill_dir
+            old_codex_home = installer.codex_home
+            try:
+                installer.source_skill_dir = lambda: skill_src
+                installer.codex_home = lambda: codex_home
+                args = argparse.Namespace(dry_run=False, hook_set="minimal")
+
+                installer.install_codex(args)
+            finally:
+                installer.source_skill_dir = old_source_skill_dir
+                installer.codex_home = old_codex_home
+
+            hooks = json.loads((codex_home / "hooks.json").read_text(encoding="utf-8"))
+            self.assertIn("SessionStart", hooks["hooks"])
+            self.assertIn("UserPromptSubmit", hooks["hooks"])
+            config_text = config_toml.read_text(encoding="utf-8")
+            self.assertIn("[features]\nhooks = true", config_text)
+            self.assertNotIn("BEGIN AI_WORKLOG_HOOKS", config_text)
+            self.assertNotIn("old = true", config_text)
+
     def test_update_config_writes_auto_backfill_defaults(self) -> None:
         installer = load_installer()
         with tempfile.TemporaryDirectory() as tmp:

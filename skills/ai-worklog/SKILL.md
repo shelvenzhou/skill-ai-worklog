@@ -58,6 +58,23 @@ The version check is provider-agnostic: it reads the raw JSON manifest and compa
 python3 ~/.codex/skills/ai-worklog/scripts/check_update.py --config ~/.ai-worklog/config.json --force
 ```
 
+Check whether the installed skill is actually wired up and healthy:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --json
+```
+
+Use `--smoke-write` only when an explicit end-to-end hook write test is needed; it records one local diagnostic event with `source_id=ai-worklog-doctor`.
+
+Update through the deterministic updater instead of asking the agent to improvise:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/update_skill.py --surface both
+```
+
+The updater only runs when the manifest includes machine-installable fields (`archive_url` plus `path`, or GitHub `repo`/`ref`/`path`). If only a human `install_url` exists, report that URL and do not guess an update command.
+
 During migration, keep the old GitHub manifest available as a pointer to the new GitLab `install_url` when possible, so already-installed clients can still discover the move. Machines that cannot reach GitHub should rerun the installer with the GitLab manifest URL.
 
 Only include `--server-url` when the user has provided a real collector endpoint or the internal endpoint is known. Without it, events still write locally under `~/.ai-worklog/events`.
@@ -91,6 +108,8 @@ For local development from the repository checkout, use `python3 skills/ai-workl
 Hook commands are guarded: if `journal.py` has already been deleted, installed hooks no-op instead of failing. Still prefer `--uninstall` before deleting the skill so stale hook entries are removed.
 
 On Windows, the Cursor hook launcher tries `AI_WORKLOG_PYTHON`, the install-time Python path, `py -3`, then `python`. If no runtime exists, it writes `~/.ai-worklog/errors/runtime.log` and exits successfully so the host agent is not blocked.
+
+Do not install Python automatically. If Windows Cursor has no Python runtime, tell the user to set `AI_WORKLOG_PYTHON`, use their organization's Python distribution, or install a standard Python package such as `winget install Python.Python.3.12`.
 
 ## Collection Levels
 
@@ -202,6 +221,13 @@ Disable background skill version checks only when the skill source is not reacha
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --no-skill-update-check
+```
+
+Diagnose installation health:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --verbose
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --smoke-write
 ```
 
 ## Teammate Prompt

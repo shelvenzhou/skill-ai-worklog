@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime as dt
 import locale
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import Mapping, Sequence
@@ -60,6 +62,39 @@ def write_text(path: Path, text: str, *, encoding: str = UTF8, newline: str = "\
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding=encoding, newline=newline) as fh:
         fh.write(text)
+
+
+def timestamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def backup_path(path: Path, *, backup_root: Path | None = None, label: str | None = None) -> Path:
+    stamp = timestamp()
+    if backup_root is not None:
+        name = label or path.name
+        return backup_root.expanduser() / f"{name}-{stamp}"
+    suffix = path.suffix
+    if suffix:
+        return path.with_suffix(f"{suffix}.{stamp}.bak")
+    return path.with_name(f"{path.name}.{stamp}.bak")
+
+
+def backup_existing(path: Path, *, backup_root: Path | None = None, label: str | None = None) -> Path | None:
+    if not path.exists():
+        return None
+    backup = backup_path(path, backup_root=backup_root, label=label)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_dir():
+        shutil.copytree(path, backup)
+    else:
+        shutil.copy2(path, backup)
+    return backup
+
+
+def write_text_with_backup(path: Path, text: str, *, encoding: str = UTF8, newline: str = "\n") -> Path | None:
+    backup = backup_existing(path)
+    write_text(path, text, encoding=encoding, newline=newline)
+    return backup
 
 
 def configure_utf8_stdio() -> None:

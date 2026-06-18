@@ -38,6 +38,23 @@ Installed hooks trigger a background remote version check on session start, thro
 python3 ~/.codex/skills/ai-worklog/scripts/check_update.py --config ~/.ai-worklog/config.json --force
 ```
 
+Verify an install from the client machine:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --json
+```
+
+Use `--smoke-write` only when you want an end-to-end hook write test; it records one local diagnostic event with `source_id=ai-worklog-doctor`.
+
+Update an installed skill when the manifest reports a newer version:
+
+```bash
+python3 ~/.codex/skills/ai-worklog/scripts/update_skill.py --surface both
+```
+
+The updater only runs when the manifest has machine-installable fields (`archive_url` plus `path`, or GitHub `repo`/`ref`/`path`). It backs up the old skill directory, replaces it, rebuilds hooks with the current config, and runs doctor.
+
 On macOS, persist upload auth for future Codex/Cursor hook processes:
 
 ```bash
@@ -61,6 +78,8 @@ python $installer --surface cursor --level full
 ```
 
 The installed Windows hook launcher tries `AI_WORKLOG_PYTHON`, the install-time Python path, `py -3`, then `python`. If none are available, it writes `~/.ai-worklog/errors/runtime.log` and exits successfully so Cursor is not blocked by observability.
+
+The installer and doctor do not install Python automatically. On Windows, set `AI_WORKLOG_PYTHON` to a managed Python executable, install Python through your organization's distribution channel, or use a standard installer such as `winget install Python.Python.3.12`.
 
 Reduce or stop collection:
 

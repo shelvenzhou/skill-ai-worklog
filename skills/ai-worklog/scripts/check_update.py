@@ -155,7 +155,7 @@ def notice_text(cfg: dict[str, Any], manifest: dict[str, Any]) -> str:
     ]
     if source:
         lines.append(f"Source: {source}")
-    lines.append("Run check_update.py --force for details, then reinstall the skill from the source above.")
+    lines.append("Run update_skill.py --surface both to back up, replace, reinstall hooks, and verify with doctor.")
     return "\n".join(lines)
 
 

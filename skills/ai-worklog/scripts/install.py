@@ -6,14 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import platform_io
+import platforms
 import skill_release
+import surfaces
 
 SKILL_NAME = skill_release.NAME
 SKILL_VERSION = skill_release.VERSION
@@ -34,56 +38,10 @@ DEFAULT_SKILL_SOURCE_URL = (
     str(skill_release.MANIFEST.get("install_url") or "")
     or "https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog"
 )
-CODEX_MINIMAL_EVENTS = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PostToolUse",
-    "SubagentStop",
-    "Stop",
-]
-CODEX_FULL_EVENTS = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PermissionRequest",
-    "PostToolUse",
-    "PreCompact",
-    "PostCompact",
-    "SubagentStop",
-    "Stop",
-]
-CURSOR_MINIMAL_EVENTS = [
-    "sessionStart",
-    "beforeSubmitPrompt",
-    "postToolUse",
-    "postToolUseFailure",
-    "afterAgentResponse",
-    "subagentStop",
-    "stop",
-]
-CURSOR_FULL_EVENTS = [
-    "workspaceOpen",
-    "sessionStart",
-    "sessionEnd",
-    "beforeSubmitPrompt",
-    "preToolUse",
-    "postToolUse",
-    "postToolUseFailure",
-    "subagentStart",
-    "subagentStop",
-    "beforeShellExecution",
-    "afterShellExecution",
-    "beforeMCPExecution",
-    "afterMCPExecution",
-    "beforeReadFile",
-    "afterFileEdit",
-    "beforeTabFileRead",
-    "afterTabFileEdit",
-    "afterAgentResponse",
-    "afterAgentThought",
-    "preCompact",
-    "stop",
-]
+CODEX_MINIMAL_EVENTS = surfaces.CODEX_MINIMAL_EVENTS
+CODEX_FULL_EVENTS = surfaces.CODEX_FULL_EVENTS
+CURSOR_MINIMAL_EVENTS = surfaces.CURSOR_MINIMAL_EVENTS
+CURSOR_FULL_EVENTS = surfaces.CURSOR_FULL_EVENTS
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -92,8 +50,7 @@ def read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(platform_io.read_text(path, encoding="utf-8-sig"))
     except Exception as exc:
-        backup = path.with_suffix(path.suffix + ".bak")
-        shutil.copy2(path, backup)
+        backup = platform_io.backup_existing(path)
         print(f"Backed up unreadable JSON {path} to {backup}: {exc}")
         return {}
     return value if isinstance(value, dict) else {}
@@ -105,127 +62,87 @@ def write_json(path: Path, value: dict[str, Any], dry_run: bool) -> None:
     if dry_run:
         print(f"[dry-run] would write {path}:\n{data}")
         return
-    if path.exists():
-        backup = path.with_suffix(path.suffix + ".bak")
-        shutil.copy2(path, backup)
-    platform_io.write_text(path, data + "\n")
+    platform_io.write_text_with_backup(path, data + "\n")
 
 
 def source_skill_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def copy_skill(destination: Path, dry_run: bool) -> Path:
-    src = source_skill_dir()
+def validate_skill_dir(path: Path) -> None:
+    required = [
+        path / "SKILL.md",
+        path / "skill-version.json",
+        path / "scripts" / "journal.py",
+        path / "scripts" / "install.py",
+    ]
+    missing = [str(item) for item in required if not item.exists()]
+    if missing:
+        raise ValueError(f"skill directory is missing required files: {', '.join(missing)}")
+
+
+def replace_skill_from_source(src: Path, destination: Path, dry_run: bool, label: str | None = None) -> Path:
+    src = src.expanduser().resolve()
     dest = destination.expanduser()
-    if src == dest:
+    if dest.exists() and src == dest.resolve():
+        validate_skill_dir(dest)
         return dest
     if dry_run:
         print(f"[dry-run] would copy {src} to {dest}")
         return dest
-    if dest.exists():
-        shutil.rmtree(dest)
+    validate_skill_dir(src)
+    backup_root = CONFIG_HOME / "backups" / "skills"
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
-    shutil.copytree(src, dest, ignore=ignore)
+    with tempfile.TemporaryDirectory(prefix=f"{SKILL_NAME}-install-") as tmp:
+        staged = Path(tmp) / SKILL_NAME
+        shutil.copytree(src, staged, ignore=ignore)
+        validate_skill_dir(staged)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        backup = None
+        if dest.exists():
+            backup = platform_io.backup_path(dest, backup_root=backup_root, label=label or dest.name)
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest), str(backup))
+            print(f"Backed up existing skill {dest} to {backup}")
+        try:
+            shutil.move(str(staged), str(dest))
+        except Exception:
+            if backup is not None and backup.exists() and not dest.exists():
+                shutil.move(str(backup), str(dest))
+            raise
+        ok, output = platforms.current_platform().repair_skill_acl(dest)
+        if not ok:
+            raise RuntimeError(f"failed to repair Windows ACL for {dest}: {output}")
     return dest
 
 
+def copy_skill(destination: Path, dry_run: bool, label: str | None = None) -> Path:
+    src = source_skill_dir()
+    return replace_skill_from_source(src, destination, dry_run, label=label)
+
+
 def cmd_file_literal(value: str) -> str:
-    return value.replace("%", "%%")
+    return platforms.cmd_file_literal(value)
 
 
 def windows_config_literal(path: Path) -> str:
-    expanded = path.expanduser()
-    try:
-        home = Path.home().resolve()
-        relative = expanded.resolve().relative_to(home)
-    except (NotImplementedError, OSError, RuntimeError, ValueError):
-        return cmd_file_literal(str(expanded))
-    parts = "\\".join(relative.parts)
-    return "%USERPROFILE%" + (f"\\{parts}" if parts else "")
+    return platforms.windows_config_literal(path)
 
 
 def windows_python_launcher_lines(python: str, script_args: str) -> str:
-    lines = []
-    lines.append('if defined AI_WORKLOG_PYTHON if exist "%AI_WORKLOG_PYTHON%" (\r\n')
-    lines.append(f'  "%AI_WORKLOG_PYTHON%" {script_args}\r\n')
-    lines.append("  if not errorlevel 1 exit /b 0\r\n")
-    lines.append(")\r\n")
-    if python.isascii():
-        lines.append(f'if exist "{cmd_file_literal(python)}" (\r\n')
-        lines.append(f'  "{cmd_file_literal(python)}" {script_args}\r\n')
-        lines.append("  if not errorlevel 1 exit /b 0\r\n")
-        lines.append(")\r\n")
-    lines.append("where py >nul 2>nul\r\n")
-    lines.append("if not errorlevel 1 (\r\n")
-    lines.append(f"  py -3 {script_args}\r\n")
-    lines.append("  if not errorlevel 1 exit /b 0\r\n")
-    lines.append(")\r\n")
-    lines.append("where python >nul 2>nul\r\n")
-    lines.append("if not errorlevel 1 (\r\n")
-    lines.append(f"  python {script_args}\r\n")
-    lines.append("  if not errorlevel 1 exit /b 0\r\n")
-    lines.append(")\r\n")
-    lines.append('set "AI_WORKLOG_ERROR_DIR=%USERPROFILE%\\.ai-worklog\\errors"\r\n')
-    lines.append('if not exist "%AI_WORKLOG_ERROR_DIR%" mkdir "%AI_WORKLOG_ERROR_DIR%" >nul 2>nul\r\n')
-    lines.append(
-        '>> "%AI_WORKLOG_ERROR_DIR%\\runtime.log" echo [%date% %time%] '
-        "No Python runtime found for ai-worklog Cursor hook. Set AI_WORKLOG_PYTHON or install Python.\r\n"
-    )
-    lines.append("exit /b 0\r\n")
-    return "".join(lines)
+    return platforms.windows_python_launcher_lines(python, script_args)
 
 
 def write_windows_hook_launcher(skill_dir: Path, surface: str, config_path: Path) -> Path:
-    launcher = skill_dir / "scripts" / f"{SKILL_NAME}-hook-{surface}.cmd"
-    python = sys.executable or "python"
-    launcher.parent.mkdir(parents=True, exist_ok=True)
-    script_args = (
-        '"%AI_WORKLOG_SCRIPT%" '
-        f'--surface "{cmd_file_literal(surface)}" '
-        '--config "%AI_WORKLOG_CONFIG%" '
-        f'--source-id "{cmd_file_literal(SKILL_NAME)}"'
-    )
-    content = (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        "set \"PYTHONUTF8=1\"\r\n"
-        "set \"PYTHONIOENCODING=utf-8\"\r\n"
-        "set \"AI_WORKLOG_SCRIPT=%~dp0journal.py\"\r\n"
-        f"set \"AI_WORKLOG_CONFIG={windows_config_literal(config_path)}\"\r\n"
-        "if not exist \"%AI_WORKLOG_SCRIPT%\" exit /b 0\r\n"
-        f"{windows_python_launcher_lines(str(python), script_args)}"
-    )
-    platform_io.write_text(launcher, content, newline="")
-    return launcher
+    return platforms.current_platform().write_windows_hook_launcher(skill_dir, surface, config_path, SKILL_NAME)
 
 
 def python_command(skill_dir: Path, surface: str, config_path: Path) -> str:
-    if os.name == "nt":
-        launcher = write_windows_hook_launcher(skill_dir, surface, config_path)
-        return subprocess.list2cmdline([str(launcher)])
-
-    journal = skill_dir / "scripts" / "journal.py"
-    python = sys.executable or "python3"
-    return (
-        "/bin/sh -c "
-        + shell_quote('test -f "$1" || exit 0; exec "$2" "$1" --surface "$3" --config "$4" --source-id "$5"')
-        + f" {shell_quote(SKILL_NAME + '-hook')}"
-        + f" {shell_quote(str(journal))}"
-        + f" {shell_quote(python)}"
-        + f" {shell_quote(surface)}"
-        + f" {shell_quote(str(config_path))}"
-        + f" {shell_quote(SKILL_NAME)}"
-    )
+    return platforms.current_platform().hook_command(skill_dir, surface, config_path, SKILL_NAME)
 
 
 def shell_quote(value: str) -> str:
-    if not value:
-        return "''"
-    safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-=.,/:@%"
-    if all(ch in safe for ch in value):
-        return value
-    return "'" + value.replace("'", "'\"'\"'") + "'"
+    return platforms.shell_quote(value)
 
 
 def hook_entry(command: str) -> dict[str, Any]:
@@ -424,11 +341,11 @@ def disable_config(dry_run: bool) -> None:
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    return surfaces.CODEX.home
 
 
 def cursor_home() -> Path:
-    return Path(os.environ.get("CURSOR_HOME") or Path.home() / ".cursor").expanduser()
+    return surfaces.CURSOR.home
 
 
 def set_toml_feature(text: str, key: str, value: str) -> str:
@@ -457,6 +374,18 @@ def set_toml_feature(text: str, key: str, value: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+AI_WORKLOG_TOML_HOOKS_BEGIN = "# BEGIN AI_WORKLOG_HOOKS"
+AI_WORKLOG_TOML_HOOKS_END = "# END AI_WORKLOG_HOOKS"
+
+
+def remove_ai_worklog_toml_hooks(text: str) -> str:
+    pattern = re.compile(
+        rf"\n?{re.escape(AI_WORKLOG_TOML_HOOKS_BEGIN)}\n.*?\n{re.escape(AI_WORKLOG_TOML_HOOKS_END)}\n?",
+        re.DOTALL,
+    )
+    return pattern.sub("\n", text).rstrip() + ("\n" if text.strip() else "")
+
+
 def ensure_codex_hooks_feature(home: Path, dry_run: bool) -> None:
     config_path = home / "config.toml"
     existing = platform_io.read_text(config_path, encoding="utf-8-sig") if config_path.exists() else ""
@@ -468,18 +397,32 @@ def ensure_codex_hooks_feature(home: Path, dry_run: bool) -> None:
         print(f"[dry-run] would write {config_path}:\n{updated}")
         return
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    if config_path.exists():
-        shutil.copy2(config_path, config_path.with_suffix(config_path.suffix + ".bak"))
-    platform_io.write_text(config_path, updated)
+    platform_io.write_text_with_backup(config_path, updated)
     print(f"Enabled Codex hooks feature in {config_path}")
+
+
+def remove_stale_codex_inline_hooks(home: Path, dry_run: bool) -> None:
+    config_path = home / "config.toml"
+    if not config_path.exists():
+        return
+    existing = platform_io.read_text(config_path, encoding="utf-8-sig") if config_path.exists() else ""
+    updated = remove_ai_worklog_toml_hooks(existing)
+    if updated == existing:
+        return
+    if dry_run:
+        print(f"[dry-run] would remove stale Codex inline hooks from {config_path}")
+    else:
+        platform_io.write_text_with_backup(config_path, updated)
+        print(f"Removed stale Codex inline hooks from {config_path}")
 
 
 def install_codex(args: argparse.Namespace) -> Path:
     home = codex_home()
-    skill_dir = copy_skill(home / "skills" / SKILL_NAME, args.dry_run)
+    skill_dir = copy_skill(home / "skills" / SKILL_NAME, args.dry_run, label="codex")
     command = python_command(skill_dir, "codex", CONFIG_PATH)
     events = CODEX_FULL_EVENTS if args.hook_set == "full" else CODEX_MINIMAL_EVENTS
     merge_hooks(home / "hooks.json", events, command, versioned=False, dry_run=args.dry_run)
+    remove_stale_codex_inline_hooks(home, args.dry_run)
     ensure_codex_hooks_feature(home, args.dry_run)
     print(f"Codex skill path: {skill_dir}")
     return skill_dir
@@ -487,7 +430,7 @@ def install_codex(args: argparse.Namespace) -> Path:
 
 def install_cursor(args: argparse.Namespace) -> None:
     home = cursor_home()
-    skill_dir = copy_skill(home / "skills" / SKILL_NAME, args.dry_run)
+    skill_dir = copy_skill(home / "skills" / SKILL_NAME, args.dry_run, label="cursor")
     command = python_command(skill_dir, "cursor", CONFIG_PATH)
     events = CURSOR_FULL_EVENTS if args.hook_set == "full" else CURSOR_MINIMAL_EVENTS
     merge_hooks(home / "hooks.json", events, command, versioned=True, dry_run=args.dry_run)
@@ -524,6 +467,7 @@ def run_codex_backfill(args: argparse.Namespace, skill_dir: Path) -> None:
 def uninstall_codex(args: argparse.Namespace) -> None:
     home = codex_home()
     remove_hooks(home / "hooks.json", versioned=False, dry_run=args.dry_run)
+    remove_stale_codex_inline_hooks(home, args.dry_run)
     print(f"Codex hook removal complete in {home}")
 
 
@@ -566,6 +510,13 @@ def run(args: argparse.Namespace) -> int:
     print(f"Local snapshots: {Path(args.snapshot_log_dir).expanduser()}")
     if args.server_url:
         print(f"Upload endpoint: {args.server_url}")
+    if not args.dry_run:
+        import doctor
+
+        report = doctor.diagnose(args.surface, smoke_write=args.smoke_test)
+        doctor.print_human(report, verbose=False)
+        if report["summary"]["status"] == "fail":
+            return 1
     return 0
 
 
@@ -621,6 +572,7 @@ def main() -> int:
         help="Minimum seconds between background remote skill version checks.",
     )
     parser.add_argument("--no-skill-update-check", action="store_true", help="Disable background remote skill version checks.")
+    parser.add_argument("--smoke-test", action="store_true", help="After installing, execute installed hooks with a synthetic doctor event.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

@@ -413,6 +413,19 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(len(list((root / "events").glob("*.jsonl"))), 1)
             self.assertEqual(len(list((root / "snapshots").glob("*.jsonl"))), 1)
 
+    def test_disable_background_env_suppresses_async_upload(self) -> None:
+        cfg = journal.default_config()
+        cfg["server_url"] = "http://collector.example/events"
+        original = os.environ.get("AI_WORKLOG_DISABLE_BACKGROUND")
+        try:
+            os.environ["AI_WORKLOG_DISABLE_BACKGROUND"] = "1"
+            self.assertFalse(journal.async_upload_enabled(cfg))
+        finally:
+            if original is None:
+                os.environ.pop("AI_WORKLOG_DISABLE_BACKGROUND", None)
+            else:
+                os.environ["AI_WORKLOG_DISABLE_BACKGROUND"] = original
+
     def test_append_jsonl_replaces_invalid_surrogates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = journal.append_jsonl(
