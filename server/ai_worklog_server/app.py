@@ -195,7 +195,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .metrics {
       grid-column: 1 / -1;
       display: grid;
-      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
       gap: 10px;
     }
     .metric, .pane, .session, .event {
@@ -298,7 +298,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     .config {
       display: grid;
-      grid-template-columns: repeat(3, minmax(220px, 1fr));
+      grid-template-columns: repeat(4, minmax(180px, 1fr));
       gap: 8px;
       padding: 10px 12px;
       border-bottom: 1px solid var(--line);
@@ -311,6 +311,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       padding: 8px 10px;
       background: var(--panel-2);
     }
+    .config-group.wide { grid-column: span 2; }
     .config-group h3 {
       margin: 0 0 7px;
       color: var(--muted);
@@ -370,6 +371,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     @media (max-width: 980px) {
       main { grid-template-columns: 1fr; }
       .metrics, .config { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .config-group.wide { grid-column: span 2; }
       .list, .timeline { max-height: none; }
     }
     @media (max-width: 560px) {
@@ -377,6 +379,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       .toolbar { width: 100%; }
       .toolbar input, .toolbar select { flex: 1; }
       .metrics, .summary, .config { grid-template-columns: 1fr; }
+      .config-group.wide { grid-column: span 1; }
       main { padding: 12px; }
     }
   </style>
@@ -636,9 +639,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       el.append(l, v);
       return el;
     }
-    function configGroup(title, rows) {
+    function configGroup(title, rows, className = "") {
       const el = document.createElement("section");
-      el.className = "config-group";
+      el.className = ["config-group", className].filter(Boolean).join(" ");
       const heading = document.createElement("h3");
       heading.textContent = title;
       const rowRoot = document.createElement("div");
@@ -660,7 +663,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           ["cwd", sessionSnapshot.cwd || envSnapshot.cwd],
           ["transcript", sessionSnapshot.transcript_path],
           ["git", git.root ? `${git.branch || "-"} @ ${git.commit || "-"} ${git.dirty ? "dirty" : "clean"}` : "none"],
-        ]),
+        ], "wide"),
         configGroup("Environment", [
           ["os", [envSnapshot.system, envSnapshot.release, envSnapshot.machine].filter(Boolean).join(" ")],
           ["shell", envSnapshot.shell],
