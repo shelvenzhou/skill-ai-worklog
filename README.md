@@ -185,6 +185,51 @@ Code metric definitions are intentionally approximate:
 
 The client records compact `workspace_diff` numstat snapshots on `Stop` / `sessionEnd`; it does not upload full diff bodies.
 
+## Troubleshooting
+
+### Windows: Codex App hooks not running after install
+
+**Symptom**: Hooks are installed and `doctor.py` reports them as present, but they never fire when using the Codex desktop app. The Codex App Settings → Hooks page shows empty.
+
+**Cause**: The Codex App does not show a trust prompt for hooks installed via `hooks.json`. Hooks must have a `trusted_hash` entry in `~/.codex/config.toml` before the app will execute them. The Codex CLI shows this trust prompt at startup; the app does not.
+
+**Fix**: Open the Codex CLI (terminal) at least once after installation. It will display a trust prompt for any new hook commands. Approve them, then restart the Codex App. The CLI and App share the same `config.toml`, so trust granted in the CLI takes effect for the App immediately.
+
+```powershell
+# Run any Codex CLI session to trigger the trust prompt
+codex
+```
+
+After approving, verify hooks are trusted:
+
+```powershell
+python $HOME\.codex\skills\ai-worklog\scripts\doctor.py --surface codex --app-server-check
+```
+
+The doctor should report `"Codex app-server discovered N trusted AI Worklog hooks."` If it reports untrusted hooks, approve them again in the CLI.
+
+**Note**: The Settings → Hooks page in the Codex App only shows enterprise-managed hooks (MDM/cloud-pushed). Hooks installed via `hooks.json` do not appear there even when working correctly — this is expected.
+
+### Cursor: prompt-based install skips hook wiring
+
+**Symptom**: Cursor's agent copies skill files but hooks never fire, because `install.py` was not run.
+
+**Fix**: After any file-copy install in Cursor, always run the installer explicitly:
+
+```bash
+# macOS/Linux
+python3 ~/.cursor/skills/ai-worklog/scripts/install.py --surface cursor --level full
+python3 ~/.cursor/skills/ai-worklog/scripts/doctor.py --surface cursor
+```
+
+```powershell
+# Windows
+python "$HOME\.cursor\skills\ai-worklog\scripts\install.py" --surface cursor --level full
+python "$HOME\.cursor\skills\ai-worklog\scripts\doctor.py" --surface cursor
+```
+
+The install is only complete when doctor reports hooks as written and usable.
+
 ## Validation
 
 ```bash
