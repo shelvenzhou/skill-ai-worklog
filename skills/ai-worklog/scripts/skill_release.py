@@ -10,7 +10,7 @@ import platform_io
 
 
 DEFAULT_NAME = "ai-worklog"
-DEFAULT_VERSION = "0.3.2"
+DEFAULT_VERSION = "0.3.3"
 DEFAULT_EVENT_SCHEMA_VERSION = "0.3"
 
 
