@@ -298,21 +298,38 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     .config {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
       gap: 8px;
-      padding: 12px;
+      padding: 10px 12px;
       border-bottom: 1px solid var(--line);
       background: var(--panel);
     }
-    .config-item {
+    .config-group {
       min-width: 0;
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 9px 10px;
+      padding: 8px 10px;
       background: var(--panel-2);
     }
-    .config-item div:last-child {
-      margin-top: 5px;
+    .config-group h3 {
+      margin: 0 0 7px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 650;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+    .config-rows { display: grid; gap: 5px; }
+    .config-row {
+      display: grid;
+      grid-template-columns: minmax(72px, .32fr) minmax(0, 1fr);
+      gap: 8px;
+      min-width: 0;
+      align-items: baseline;
+    }
+    .config-row .label { font-size: 11px; }
+    .config-row .mono {
       font-size: 12px;
       overflow-wrap: anywhere;
     }
@@ -352,7 +369,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .empty { padding: 22px 12px; color: var(--muted); text-align: center; }
     @media (max-width: 980px) {
       main { grid-template-columns: 1fr; }
-      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metrics, .config { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .list, .timeline { max-height: none; }
     }
     @media (max-width: 560px) {
@@ -415,11 +432,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!user) return "-";
       const matched = user.matched_identity ? `${user.matched_identity.kind}:${user.matched_identity.value}` : user.identity_key;
       return `${user.claimed ? "claimed" : "unclaimed"} ${compact(user.identity_source)} ${compact(matched)}`;
-    }
-    function modelTokenSummary(byModel) {
-      const entries = Object.entries(byModel || {});
-      if (!entries.length) return "-";
-      return entries.map(([model, totals]) => `${model}: ${fmt.format(tokenValue(totals, "total_tokens"))}`).join(" / ");
     }
     function metric(label, value) {
       const el = document.createElement("div");
@@ -574,17 +586,6 @@ DASHBOARD_HTML = r"""<!doctype html>
         .sort((a, b) => String(a.received_at || "").localeCompare(String(b.received_at || "")));
       renderTimeline(timelineRecords);
     }
-    function mini(label, value) {
-      const el = document.createElement("div");
-      el.className = "mini";
-      const l = document.createElement("div");
-      l.className = "label";
-      l.textContent = label;
-      const v = document.createElement("strong");
-      v.textContent = compact(value);
-      el.append(l, v);
-      return el;
-    }
     function summaryCard(label, value, rows = []) {
       const el = document.createElement(rows.length ? "details" : "div");
       el.className = "summary-card";
@@ -623,9 +624,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       return el;
     }
-    function configItem(label, value) {
+    function configRow(label, value) {
       const el = document.createElement("div");
-      el.className = "config-item";
+      el.className = "config-row";
       const l = document.createElement("div");
       l.className = "label";
       l.textContent = label;
@@ -635,26 +636,39 @@ DASHBOARD_HTML = r"""<!doctype html>
       el.append(l, v);
       return el;
     }
+    function configGroup(title, rows) {
+      const el = document.createElement("section");
+      el.className = "config-group";
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      const rowRoot = document.createElement("div");
+      rowRoot.className = "config-rows";
+      rowRoot.replaceChildren(...rows.map(([label, value]) => configRow(label, value)));
+      el.append(heading, rowRoot);
+      return el;
+    }
     function renderConfig(snapshots, codeMetrics) {
       const sessionSnapshot = (snapshots.session || [])[0]?.session || {};
       const envSnapshot = (snapshots.environment || [])[0]?.environment || {};
       const git = envSnapshot.git || {};
       $("config").replaceChildren(
-        configItem("user", userLabel(state.detail?.session?.user)),
-        configItem("identity", identityLabel(state.detail?.session?.user)),
-        configItem("token models", modelTokenSummary(state.detail?.session?.token_totals_by_model)),
-        configItem("model", sessionSnapshot.model),
-        configItem("permission", sessionSnapshot.permission_mode),
-        configItem("cwd", sessionSnapshot.cwd || envSnapshot.cwd),
-        configItem("surface", sessionSnapshot.surface),
-        configItem("transcript", sessionSnapshot.transcript_path),
-        configItem("os", [envSnapshot.system, envSnapshot.release, envSnapshot.machine].filter(Boolean).join(" ")),
-        configItem("shell", envSnapshot.shell),
-        configItem("git", git.root ? `${git.branch || "-"} @ ${git.commit || "-"} ${git.dirty ? "dirty" : "clean"}` : "none"),
-        configItem("adoption source", codeMetrics.adoption_source),
-        configItem("latest commit event", codeMetrics.latest_git_commit_event_id),
-        configItem("latest commit code", `${codeMetrics.latest_git_commit_code?.additions || 0}+ / -${codeMetrics.latest_git_commit_code?.deletions || 0} / ${codeMetrics.latest_git_commit_code?.files || 0} files`),
-        configItem("uncommitted", `${codeMetrics.uncommitted_code?.additions || 0}+ / ${codeMetrics.uncommitted_code?.files || 0} files`),
+        configGroup("Session", [
+          ["model", sessionSnapshot.model],
+          ["permission", sessionSnapshot.permission_mode],
+        ]),
+        configGroup("Workspace", [
+          ["cwd", sessionSnapshot.cwd || envSnapshot.cwd],
+          ["transcript", sessionSnapshot.transcript_path],
+          ["git", git.root ? `${git.branch || "-"} @ ${git.commit || "-"} ${git.dirty ? "dirty" : "clean"}` : "none"],
+        ]),
+        configGroup("Environment", [
+          ["os", [envSnapshot.system, envSnapshot.release, envSnapshot.machine].filter(Boolean).join(" ")],
+          ["shell", envSnapshot.shell],
+        ]),
+        configGroup("Code", [
+          ["adoption", codeMetrics.adoption_source],
+          ["commit event", codeMetrics.latest_git_commit_event_id],
+        ]),
       );
     }
     function eventBlocks(record) {
