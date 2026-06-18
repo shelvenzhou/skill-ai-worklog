@@ -311,7 +311,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       padding: 8px 10px;
       background: var(--panel-2);
     }
-    .config-group.wide { grid-column: span 2; }
+    .config-group.wide { grid-column: span 3; }
+    .config-group.half { grid-column: span 2; }
     .config-group h3 {
       margin: 0 0 7px;
       color: var(--muted);
@@ -372,6 +373,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       main { grid-template-columns: 1fr; }
       .metrics, .config { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .config-group.wide { grid-column: span 2; }
+      .config-group.half { grid-column: span 1; }
       .list, .timeline { max-height: none; }
     }
     @media (max-width: 560px) {
@@ -380,6 +382,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       .toolbar input, .toolbar select { flex: 1; }
       .metrics, .summary, .config { grid-template-columns: 1fr; }
       .config-group.wide { grid-column: span 1; }
+      .config-group.half { grid-column: span 1; }
       main { padding: 12px; }
     }
   </style>
@@ -667,11 +670,11 @@ DASHBOARD_HTML = r"""<!doctype html>
         configGroup("Environment", [
           ["os", [envSnapshot.system, envSnapshot.release, envSnapshot.machine].filter(Boolean).join(" ")],
           ["shell", envSnapshot.shell],
-        ]),
+        ], "half"),
         configGroup("Code", [
           ["adoption", codeMetrics.adoption_source],
           ["commit event", codeMetrics.latest_git_commit_event_id],
-        ]),
+        ], "half"),
       );
     }
     function eventBlocks(record) {
