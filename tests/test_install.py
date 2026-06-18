@@ -356,7 +356,7 @@ class InstallScriptTests(unittest.TestCase):
                 {
                     "enabled": True,
                     "name": "ai-worklog",
-                    "current_version": "0.3.3",
+                    "current_version": "0.3.4",
                     "manifest_url": "https://example.com/manifest.json",
                     "source_url": "https://example.com/skill",
                     "trigger_interval_seconds": 86400,
