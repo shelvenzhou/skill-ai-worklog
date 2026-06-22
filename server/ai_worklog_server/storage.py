@@ -573,6 +573,21 @@ class WorklogStore:
         self._backfill_token_columns(conn)
 
     def _backfill_token_columns(self, conn: sqlite3.Connection) -> None:
+        count_row = conn.execute(
+            """
+            select count(*) as c from records
+            where token_usage_identity is null
+               or (
+                 input_tokens is null
+                 and cached_input_tokens is null
+                 and output_tokens is null
+                 and reasoning_output_tokens is null
+                 and total_tokens is null
+               )
+            """
+        ).fetchone()
+        if int(count_row["c"]) == 0:
+            return
         rows = conn.execute(
             """
             select record_pk, raw_json

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import html
 import json
 import os
 import threading
@@ -766,6 +767,17 @@ DASHBOARD_HTML = r"""<!doctype html>
 """
 
 
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def parse_limit(query: dict[str, list[str]], default: int, max_val: int = 500) -> tuple[int, str | None]:
+    raw = (query.get("limit") or [str(default)])[0]
+    try:
+        return max(1, min(int(raw), max_val)), None
+    except ValueError:
+        return default, f"invalid limit: {raw!r}"
+
+
 class WorklogHandler(BaseHTTPRequestHandler):
     store: WorklogStore
     upload_token: str | None = None
@@ -874,7 +886,10 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/sessions":
             query = parse_qs(parsed.query)
-            limit = int((query.get("limit") or ["50"])[0])
+            limit, limit_err = parse_limit(query, default=50)
+            if limit_err:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": limit_err})
+                return
             surface = (query.get("surface") or [None])[0]
             cache_key = (id(self.store), self.store.cache_version(), surface, max(1, min(limit, 500)))
             handler_cls = type(self)
@@ -911,7 +926,10 @@ class WorklogHandler(BaseHTTPRequestHandler):
             if not session_id:
                 write_json(self, HTTPStatus.BAD_REQUEST, {"error": "missing session id"})
                 return
-            limit = int((query.get("limit") or ["200"])[0])
+            limit, limit_err = parse_limit(query, default=200)
+            if limit_err:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": limit_err})
+                return
             surface = (query.get("surface") or [None])[0]
             query_session_id = None if session_id == "unknown" else session_id
             events = self.store.query_events_for_analysis(surface=surface, session_id=query_session_id)
@@ -931,7 +949,10 @@ class WorklogHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/records":
             query = parse_qs(parsed.query)
-            limit = int((query.get("limit") or ["50"])[0])
+            limit, limit_err = parse_limit(query, default=50)
+            if limit_err:
+                write_json(self, HTTPStatus.BAD_REQUEST, {"error": limit_err})
+                return
             records = self.store.query_records(
                 limit=limit,
                 record_type=(query.get("record_type") or [None])[0],
@@ -947,6 +968,9 @@ class WorklogHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/auth/login":
             length = int(self.headers.get("Content-Length") or "0")
+            if length > MAX_UPLOAD_BYTES:
+                write_html(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request too large")
+                return
             body = self.rfile.read(length).decode("utf-8", errors="replace")
             token = (parse_qs(body).get("token") or [""])[0]
             if self.token_matches(self.ui_token, token):
@@ -977,6 +1001,9 @@ class WorklogHandler(BaseHTTPRequestHandler):
                 write_json(self, HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
             length = int(self.headers.get("Content-Length") or "0")
+            if length > MAX_UPLOAD_BYTES:
+                write_json(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "request too large"})
+                return
             body = self.rfile.read(length).decode("utf-8", errors="replace")
             try:
                 payload = json.loads(body) if body.strip() else {}
@@ -1003,6 +1030,9 @@ class WorklogHandler(BaseHTTPRequestHandler):
             return
 
         length = int(self.headers.get("Content-Length") or "0")
+        if length > MAX_UPLOAD_BYTES:
+            write_json(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "request too large"})
+            return
         body = self.rfile.read(length)
 
         if parsed.path == "/events/exists":
@@ -1081,7 +1111,7 @@ class WorklogHandler(BaseHTTPRequestHandler):
         return None
 
     def login_html(self, error: str = "") -> str:
-        return LOGIN_HTML.replace("{{ERROR}}", error)
+        return LOGIN_HTML.replace("{{ERROR}}", html.escape(error))
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}")

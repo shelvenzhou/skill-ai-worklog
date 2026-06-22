@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import sqlite3
 import threading
@@ -1133,6 +1134,67 @@ class AppEndpointTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+
+class ServerInputValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.server = build_server("127.0.0.1", 0, Path(self.tmp.name), None)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def test_invalid_limit_returns_400_on_sessions(self) -> None:
+        try:
+            urllib.request.urlopen(f"{self.base_url}/sessions?limit=abc", timeout=5)
+            self.fail("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 400)
+            body = json.loads(exc.read().decode("utf-8"))
+            self.assertIn("invalid limit", body["error"])
+
+    def test_invalid_limit_returns_400_on_records(self) -> None:
+        try:
+            urllib.request.urlopen(f"{self.base_url}/records?limit=xyz", timeout=5)
+            self.fail("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 400)
+            body = json.loads(exc.read().decode("utf-8"))
+            self.assertIn("invalid limit", body["error"])
+
+    def test_oversized_post_returns_413(self) -> None:
+        over_limit = 51 * 1024 * 1024
+        port = self.server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.connect()
+            conn.putrequest("POST", "/events")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(over_limit))
+            conn.endheaders()
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 413)
+            body = json.loads(resp.read().decode("utf-8"))
+            self.assertIn("too large", body["error"])
+        finally:
+            conn.close()
+
+    def test_large_valid_post_accepted(self) -> None:
+        record = json.dumps({"record_type": "event", "event_id": "big1", "session_id": "s1"})
+        data = (record + "\n").encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/events",
+            data=data,
+            headers={"Content-Type": "application/x-ndjson", "Content-Length": str(len(data))},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 202)
 
 
 if __name__ == "__main__":
