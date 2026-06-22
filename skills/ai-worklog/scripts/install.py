@@ -145,7 +145,31 @@ def shell_quote(value: str) -> str:
     return platforms.shell_quote(value)
 
 
-def hook_entry(command: str) -> dict[str, Any]:
+def hook_command(hook: Any) -> str:
+    if not isinstance(hook, dict):
+        return ""
+    return str(hook.get("command") or hook.get("commandWindows") or "")
+
+
+def is_worklog_command(command: str) -> bool:
+    return ("ai-worklog" in command or "ai-usage-collector" in command) and (
+        "journal.py" in command
+        or "ai-worklog-hook" in command
+        or "collector.py" in command
+        or "codex_backfill.py" in command
+        or "codex_backfill_trigger.py" in command
+    )
+
+
+def is_worklog_hook(hook: Any) -> bool:
+    return is_worklog_command(hook_command(hook))
+
+
+def hook_entry(command: str, entry_style: str = "codex") -> dict[str, Any]:
+    if entry_style == "cursor":
+        return {"command": command}
+    if entry_style != "codex":
+        raise ValueError(f"unsupported hook entry style: {entry_style}")
     hook: dict[str, Any] = {
         "type": "command",
         "command": command,
@@ -159,41 +183,58 @@ def hook_entry(command: str) -> dict[str, Any]:
     }
 
 
-def is_worklog_entry(entry: Any) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    hooks = entry.get("hooks")
-    if not isinstance(hooks, list):
-        return False
-    for hook in hooks:
-        if isinstance(hook, dict):
-            command = str(hook.get("command") or "")
-            if ("ai-worklog" in command or "ai-usage-collector" in command) and (
-                "journal.py" in command
-                or "ai-worklog-hook" in command
-                or "collector.py" in command
-                or "codex_backfill.py" in command
-                or "codex_backfill_trigger.py" in command
-            ):
-                return True
-    return False
+def cursor_entry_from_hook(hook: Any, inherited_matcher: Any = None) -> Any:
+    command = hook_command(hook)
+    if not command:
+        return hook
+    entry: dict[str, Any] = {"command": command}
+    matcher = hook.get("matcher") if isinstance(hook, dict) else None
+    if matcher is None:
+        matcher = inherited_matcher
+    if isinstance(matcher, str) and matcher:
+        entry["matcher"] = matcher
+    return entry
 
 
-def without_worklog_hooks(entry: Any) -> dict[str, Any] | None:
+def entries_without_worklog(entry: Any, entry_style: str) -> tuple[list[Any], int]:
+    if entry_style not in {"codex", "cursor"}:
+        raise ValueError(f"unsupported hook entry style: {entry_style}")
     if not isinstance(entry, dict):
-        return entry
+        return [entry], 0
+    if is_worklog_hook(entry):
+        return [], 1
+
     entry_hooks = entry.get("hooks")
     if not isinstance(entry_hooks, list):
-        return entry
-    filtered_hooks = [hook for hook in entry_hooks if not is_worklog_entry({"hooks": [hook]})]
-    if not filtered_hooks:
-        return None
+        return [entry], 0
+
+    removed = 0
+    kept_hooks = []
+    for hook in entry_hooks:
+        if is_worklog_hook(hook):
+            removed += 1
+            continue
+        kept_hooks.append(hook)
+
+    if entry_style == "cursor":
+        matcher = entry.get("matcher")
+        return [cursor_entry_from_hook(hook, matcher) for hook in kept_hooks], removed
+
+    if not kept_hooks:
+        return [], removed
     updated = dict(entry)
-    updated["hooks"] = filtered_hooks
-    return updated
+    updated["hooks"] = kept_hooks
+    return [updated], removed
 
 
-def merge_hooks(path: Path, events: list[str], command: str, versioned: bool, dry_run: bool) -> None:
+def merge_hooks(
+    path: Path,
+    events: list[str],
+    command: str,
+    versioned: bool,
+    dry_run: bool,
+    entry_style: str = "codex",
+) -> None:
     doc = read_json(path)
     if versioned:
         doc.setdefault("version", 1)
@@ -206,7 +247,10 @@ def merge_hooks(path: Path, events: list[str], command: str, versioned: bool, dr
         event_entries = hooks.get(existing_event)
         if not isinstance(event_entries, list):
             continue
-        filtered = [entry for entry in (without_worklog_hooks(entry) for entry in event_entries) if entry is not None]
+        filtered = []
+        for entry in event_entries:
+            kept_entries, _removed = entries_without_worklog(entry, entry_style)
+            filtered.extend(kept_entries)
         if filtered:
             hooks[existing_event] = filtered
         else:
@@ -218,14 +262,14 @@ def merge_hooks(path: Path, events: list[str], command: str, versioned: bool, dr
         if not isinstance(event_entries, list):
             event_entries = []
             hooks[event_name] = event_entries
-        event_entries.append(hook_entry(command))
+        event_entries.append(hook_entry(command, entry_style))
         added += 1
 
     write_json(path, doc, dry_run)
     print(f"Installed {added} hook handlers in {path}")
 
 
-def remove_hooks(path: Path, versioned: bool, dry_run: bool) -> int:
+def remove_hooks(path: Path, versioned: bool, dry_run: bool, entry_style: str = "codex") -> int:
     doc = read_json(path)
     if versioned and doc:
         doc.setdefault("version", 1)
@@ -241,16 +285,9 @@ def remove_hooks(path: Path, versioned: bool, dry_run: bool) -> int:
             continue
         filtered = []
         for entry in event_entries:
-            original_hooks = entry.get("hooks") if isinstance(entry, dict) else None
-            original_count = len(original_hooks) if isinstance(original_hooks, list) else 0
-            updated = without_worklog_hooks(entry)
-            if updated is None:
-                removed += max(1, original_count)
-                continue
-            updated_hooks = updated.get("hooks") if isinstance(updated, dict) else None
-            updated_count = len(updated_hooks) if isinstance(updated_hooks, list) else original_count
-            removed += max(0, original_count - updated_count)
-            filtered.append(updated)
+            kept_entries, removed_count = entries_without_worklog(entry, entry_style)
+            removed += removed_count
+            filtered.extend(kept_entries)
         if filtered:
             hooks[existing_event] = filtered
         else:
@@ -444,7 +481,7 @@ def install_cursor(args: argparse.Namespace) -> None:
     skill_dir = copy_skill(home / "skills" / SKILL_NAME, args.dry_run, label="cursor")
     command = python_command(skill_dir, "cursor", CONFIG_PATH)
     events = CURSOR_FULL_EVENTS if args.hook_set == "full" else CURSOR_MINIMAL_EVENTS
-    merge_hooks(home / "hooks.json", events, command, versioned=True, dry_run=args.dry_run)
+    merge_hooks(home / "hooks.json", events, command, versioned=True, dry_run=args.dry_run, entry_style="cursor")
     print(f"Cursor skill path: {skill_dir}")
 
 
@@ -486,7 +523,7 @@ def uninstall_codex(args: argparse.Namespace) -> None:
 
 def uninstall_cursor(args: argparse.Namespace) -> None:
     home = cursor_home()
-    remove_hooks(home / "hooks.json", versioned=True, dry_run=args.dry_run)
+    remove_hooks(home / "hooks.json", versioned=True, dry_run=args.dry_run, entry_style="cursor")
     print(f"Cursor hook removal complete in {home}")
 
 

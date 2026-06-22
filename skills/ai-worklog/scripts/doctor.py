@@ -70,6 +70,9 @@ def iter_jsonl(path: Path) -> list[dict[str, Any]]:
 def hook_command_from_entry(entry: Any) -> str | None:
     if not isinstance(entry, dict):
         return None
+    direct_command = str(entry.get("command") or entry.get("commandWindows") or "")
+    if "ai-worklog" in direct_command and ("journal.py" in direct_command or "ai-worklog-hook" in direct_command):
+        return direct_command
     hooks = entry.get("hooks")
     if not isinstance(hooks, list):
         return None

@@ -188,6 +188,95 @@ class InstallScriptTests(unittest.TestCase):
             worklog_hook = next(hook for entry in entries for hook in entry["hooks"] if hook["command"] == old_command)
             self.assertEqual(worklog_hook["commandWindows"], old_command)
 
+    def test_cursor_merge_writes_flat_hooks_and_migrates_old_nested_entries(self) -> None:
+        installer = load_installer()
+        original_os_name = installer.os.name
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / "hooks.json"
+            old_command = r"C:\Users\user\.cursor\skills\ai-worklog\scripts\ai-worklog-hook-cursor.cmd"
+            other_command = "python other.py"
+            hooks_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "hooks": {
+                            "sessionStart": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": old_command,
+                                            "commandWindows": old_command,
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": other_command,
+                                        },
+                                    ]
+                                },
+                                {"command": old_command},
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            try:
+                installer.os.name = "nt"
+                installer.merge_hooks(
+                    hooks_path,
+                    ["sessionStart"],
+                    old_command,
+                    versioned=True,
+                    dry_run=False,
+                    entry_style="cursor",
+                )
+            finally:
+                installer.os.name = original_os_name
+
+            doc = json.loads(hooks_path.read_text(encoding="utf-8"))
+            entries = doc["hooks"]["sessionStart"]
+            self.assertEqual(doc["version"], 1)
+            self.assertEqual([entry["command"] for entry in entries], [other_command, old_command])
+            for entry in entries:
+                self.assertNotIn("hooks", entry)
+                self.assertNotIn("commandWindows", entry)
+                self.assertNotIn("type", entry)
+
+    def test_cursor_remove_handles_flat_and_legacy_nested_entries(self) -> None:
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / "hooks.json"
+            old_command = r"C:\Users\user\.cursor\skills\ai-worklog\scripts\ai-worklog-hook-cursor.cmd"
+            other_command = "python other.py"
+            hooks_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "hooks": {
+                            "postToolUse": [
+                                {"command": old_command},
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": old_command},
+                                        {"type": "command", "command": other_command},
+                                    ]
+                                },
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            removed = installer.remove_hooks(hooks_path, versioned=True, dry_run=False, entry_style="cursor")
+            doc = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(removed, 2)
+            self.assertEqual(doc["hooks"]["postToolUse"], [{"command": other_command}])
+
     def test_disable_config_marks_collection_off_without_deleting_paths(self) -> None:
         installer = load_installer()
         with tempfile.TemporaryDirectory() as tmp:

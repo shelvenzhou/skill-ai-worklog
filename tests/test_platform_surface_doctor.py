@@ -88,6 +88,12 @@ class PlatformSurfaceDoctorTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("OWNER RIGHTS", details)
 
+    def test_doctor_reads_flat_cursor_hook_entry(self) -> None:
+        doctor = load_script("doctor")
+        command = r"C:\Users\user\.cursor\skills\ai-worklog\scripts\ai-worklog-hook-cursor.cmd"
+
+        self.assertEqual(doctor.hook_command_from_entry({"command": command}), command)
+
     def test_doctor_json_reports_hook_and_update_status(self) -> None:
         doctor = load_script("doctor")
         journal = load_script("journal")
