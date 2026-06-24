@@ -52,6 +52,74 @@ class JournalTests(unittest.TestCase):
         finally:
             sys.stdin = original_stdin
 
+    def test_read_stdin_json_accepts_utf8_bom(self) -> None:
+        class BinaryStdin:
+            def __init__(self, data: bytes) -> None:
+                self.buffer = BytesIO(data)
+
+            def read(self) -> str:
+                raise AssertionError("text stdin should not be used when buffer is available")
+
+        original_stdin = sys.stdin
+        try:
+            sys.stdin = BinaryStdin(b'\xef\xbb\xbf{"hook_event_name":"postToolUse","session_id":"s1"}')  # type: ignore[assignment]
+            payload = journal.read_stdin_json()
+        finally:
+            sys.stdin = original_stdin
+
+        self.assertEqual(payload["hook_event_name"], "postToolUse")
+        self.assertEqual(payload["session_id"], "s1")
+
+    def test_append_jsonl_handles_concurrent_large_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = """
+import json
+import sys
+from pathlib import Path
+import journal
+
+directory = Path(sys.argv[1])
+worker = sys.argv[2]
+payload = "x" * 200000
+for index in range(20):
+    journal.append_jsonl(directory, {"record_type": "event", "event_id": f"{worker}-{index}", "payload": payload})
+"""
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parent)
+            processes = [
+                subprocess.Popen([sys.executable, "-c", script, str(root / "events"), str(worker)], env=env)
+                for worker in range(8)
+            ]
+            for process in processes:
+                self.assertEqual(process.wait(timeout=30), 0)
+
+            files = list((root / "events").glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 160)
+            event_ids = {json.loads(line)["event_id"] for line in lines}
+            self.assertEqual(len(event_ids), 160)
+
+    def test_raw_hook_input_large_strings_are_truncated(self) -> None:
+        cfg = journal.default_config()
+        cfg["max_raw_hook_input_chars"] = 10
+        event, _snapshots = journal.build_records(
+            {
+                "hook_event_name": "postToolUse",
+                "session_id": "s1",
+                "tool_output": "x" * 50,
+            },
+            cfg,
+            "cursor",
+            "ai-worklog",
+        )
+
+        self.assertIsNotNone(event)
+        raw = event["raw_hook_input"]  # type: ignore[index]
+        self.assertEqual(raw["tool_output"]["length"], 50)  # type: ignore[index]
+        self.assertEqual(raw["tool_output"]["truncated_prefix"], "x" * 10)  # type: ignore[index]
+
     def test_session_identity_uses_git_email_without_explicit_env(self) -> None:
         original_run = journal.run_metadata_command
         original_user_email = os.environ.pop("AI_WORKLOG_USER_EMAIL", None)
@@ -549,6 +617,7 @@ class ReplayTests(unittest.TestCase):
             cfg["snapshot_log_dir"] = str(root / "snapshots")
             cfg["local_log_dir"] = str(root / "events")
             cfg["failed_log_dir"] = str(root / "failed")
+            cfg["quarantine_log_dir"] = str(root / "quarantine")
 
             (root / "snapshots").mkdir()
             (root / "events").mkdir()
@@ -575,6 +644,51 @@ class ReplayTests(unittest.TestCase):
             records = replay.load_replay_records(cfg)
             self.assertEqual([journal.record_pk(record) for record in records], ["snapshot:s1", "event:e1", "event:e2"])
             self.assertNotIn("upload_failed_at", records[2])
+
+    def test_replay_skips_and_quarantines_invalid_jsonl_lines(self) -> None:
+        original_existing = replay.existing_record_pks
+        original_upload = replay.upload_records
+        uploaded: list[str] = []
+
+        def fake_existing(record_pks: list[str], cfg: dict[str, object]) -> set[str]:
+            return set()
+
+        def fake_upload(records: list[dict[str, object]], cfg: dict[str, object]) -> dict[str, int]:
+            uploaded.extend(str(record.get("event_id")) for record in records)
+            return {"accepted": len(records), "duplicates": 0}
+
+        try:
+            replay.existing_record_pks = fake_existing
+            replay.upload_records = fake_upload
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cfg = self.write_replay_event(root)
+                cfg["quarantine_log_dir"] = str(root / "quarantine")
+                event_file = root / "events" / "2026-06-16.jsonl"
+                event_file.write_text(
+                    "\n".join(
+                        [
+                            json.dumps({"record_type": "event", "event_id": "e1"}),
+                            "broken tail}",
+                            json.dumps({"record_type": "event", "event_id": "e2"}),
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                result = replay.replay(cfg, batch_size=100)
+                quarantine_files = list((root / "quarantine").glob("*.jsonl"))
+                quarantine_record = json.loads(quarantine_files[0].read_text(encoding="utf-8").splitlines()[0])
+        finally:
+            replay.existing_record_pks = original_existing
+            replay.upload_records = original_upload
+
+        self.assertEqual(result["invalid_lines"], 1)
+        self.assertEqual(uploaded, ["e1", "e2"])
+        self.assertEqual(len(quarantine_files), 1)
+        self.assertEqual(quarantine_record["record_type"], "invalid_jsonl_line")
+        self.assertEqual(quarantine_record["line_no"], 2)
 
     def test_replay_records_successful_uploads_in_local_ledger(self) -> None:
         calls = {"preflight": 0, "upload": 0}

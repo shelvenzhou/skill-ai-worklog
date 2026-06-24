@@ -20,7 +20,31 @@ import platform_io
 FAILED_UPLOAD_KEYS = {"upload_error", "upload_failed_at"}
 
 
-def iter_jsonl_records(directory: Path) -> Iterable[dict[str, Any]]:
+def quarantine_dir(cfg: dict[str, Any]) -> Path:
+    explicit = cfg.get("quarantine_log_dir")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    return journal.DEFAULT_HOME / "quarantine"
+
+
+def quarantine_invalid_line(path: Path, line_no: int, line: str, error: str, cfg: dict[str, Any]) -> None:
+    record = {
+        "record_type": "invalid_jsonl_line",
+        "source_path": str(path),
+        "line_no": line_no,
+        "error": error,
+        "captured_at": journal.utc_now(),
+        "raw_line": line.rstrip("\n"),
+    }
+    journal.append_jsonl(quarantine_dir(cfg), record)
+
+
+def iter_jsonl_records(
+    directory: Path,
+    *,
+    cfg: dict[str, Any] | None = None,
+    invalid_stats: dict[str, int] | None = None,
+) -> Iterable[dict[str, Any]]:
     if not directory.exists():
         return
     for path in sorted(directory.glob("*.jsonl")):
@@ -31,9 +55,17 @@ def iter_jsonl_records(directory: Path) -> Iterable[dict[str, Any]]:
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}:{line_no}: {exc}") from exc
+                    if invalid_stats is not None:
+                        invalid_stats["invalid_lines"] = invalid_stats.get("invalid_lines", 0) + 1
+                    if cfg is not None:
+                        quarantine_invalid_line(path, line_no, line, str(exc), cfg)
+                    continue
                 if not isinstance(record, dict):
-                    raise ValueError(f"{path}:{line_no}: expected a JSON object")
+                    if invalid_stats is not None:
+                        invalid_stats["invalid_lines"] = invalid_stats.get("invalid_lines", 0) + 1
+                    if cfg is not None:
+                        quarantine_invalid_line(path, line_no, line, "expected a JSON object", cfg)
+                    continue
                 yield normalize_record(record)
 
 
@@ -44,7 +76,7 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
-def load_replay_records(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+def load_replay_records(cfg: dict[str, Any], invalid_stats: dict[str, int] | None = None) -> list[dict[str, Any]]:
     directories = [
         Path(str(cfg.get("snapshot_log_dir") or journal.DEFAULT_HOME / "snapshots")).expanduser(),
         Path(str(cfg.get("local_log_dir") or journal.DEFAULT_HOME / "events")).expanduser(),
@@ -53,7 +85,7 @@ def load_replay_records(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
     for directory in directories:
-        for record in iter_jsonl_records(directory):
+        for record in iter_jsonl_records(directory, cfg=cfg, invalid_stats=invalid_stats):
             pk = journal.record_pk(record)
             if pk in seen:
                 continue
@@ -175,9 +207,11 @@ def upload_records(records: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[s
 def replay(cfg: dict[str, Any], batch_size: int, *, force: bool = False) -> dict[str, int]:
     collector_url = collector_key(cfg)
     ledger = UploadLedger(upload_state_path(cfg))
-    records = load_replay_records(cfg)
+    invalid_stats = {"invalid_lines": 0}
+    records = load_replay_records(cfg, invalid_stats)
     summary = {
         "scanned": len(records),
+        "invalid_lines": invalid_stats["invalid_lines"],
         "skipped_local": 0,
         "skipped_existing": 0,
         "attempted": 0,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import json
@@ -31,6 +32,9 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 2.0
 DEFAULT_ASYNC_UPLOAD_INTERVAL_SECONDS = 60
 DEFAULT_ASYNC_UPLOAD_LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_ASYNC_UPLOAD_MAX_RUNTIME_SECONDS = 2 * 60
+DEFAULT_FILE_LOCK_WAIT_SECONDS = 30.0
+DEFAULT_FILE_LOCK_STALE_SECONDS = 2 * 60
+DEFAULT_MAX_RAW_HOOK_INPUT_CHARS = 64 * 1024
 SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -159,6 +163,7 @@ def default_config() -> dict[str, Any]:
             "notify_interval_seconds": 24 * 60 * 60,
         },
         "max_transcript_bytes": DEFAULT_MAX_TRANSCRIPT_BYTES,
+        "max_raw_hook_input_chars": DEFAULT_MAX_RAW_HOOK_INPUT_CHARS,
         "capture": {
             "raw_hook_input": True,
             "prompt": True,
@@ -209,12 +214,12 @@ def read_stdin_text() -> str:
     if buffer is not None:
         data = buffer.read()
         if isinstance(data, bytes):
-            return data.decode("utf-8", errors="replace")
+            return data.decode("utf-8-sig", errors="replace")
     return sys.stdin.read()
 
 
 def read_stdin_json() -> dict[str, Any]:
-    raw = read_stdin_text()
+    raw = read_stdin_text().lstrip("\ufeff")
     if not raw.strip():
         return {}
     try:
@@ -242,6 +247,51 @@ def json_safe(value: Any) -> Any:
 
 def json_dumps(value: Any, **kwargs: Any) -> str:
     return json.dumps(json_safe(value), **kwargs)
+
+
+def acquire_sidecar_lock(path: Path, wait_seconds: float = DEFAULT_FILE_LOCK_WAIT_SECONDS) -> int:
+    lock_path = path.with_name(f"{path.name}.lock")
+    deadline = time.time() + max(0.0, wait_seconds)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            return os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age = 0
+            if age >= DEFAULT_FILE_LOCK_STALE_SECONDS:
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                else:
+                    continue
+            if time.time() >= deadline:
+                raise TimeoutError(f"timed out waiting for lock: {lock_path}")
+            time.sleep(0.05)
+
+
+@contextmanager
+def sidecar_lock(path: Path, wait_seconds: float = DEFAULT_FILE_LOCK_WAIT_SECONDS):
+    fd = acquire_sidecar_lock(path, wait_seconds)
+    lock_path = path.with_name(f"{path.name}.lock")
+    try:
+        os.write(fd, f"pid={os.getpid()} started={utc_now()}\n".encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        yield
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def stable_hash(value: Any) -> str:
@@ -282,6 +332,23 @@ def summarize_value(value: Any) -> Any:
             "keys": sorted(str(k) for k in value.keys()),
             "sha256": stable_hash(value),
         }
+    return value
+
+
+def truncate_large_strings(value: Any, max_chars: int) -> Any:
+    if isinstance(value, str):
+        if len(value) <= max_chars:
+            return value
+        return {
+            "type": "string",
+            "length": len(value),
+            "sha256": sha256_text(value),
+            "truncated_prefix": value[:max_chars],
+        }
+    if isinstance(value, dict):
+        return {str(k): truncate_large_strings(v, max_chars) for k, v in value.items()}
+    if isinstance(value, list):
+        return [truncate_large_strings(item, max_chars) for item in value]
     return value
 
 
@@ -900,7 +967,9 @@ def build_records(payload: dict[str, Any], cfg: dict[str, Any], surface: str, so
             event["hook_usage"] = hook_usage if level == "full" else summarize_value(hook_usage)
 
     if level == "full" and cfg.get("capture", {}).get("raw_hook_input", True):
-        event["raw_hook_input"] = scrub_sensitive(event_specific_payload(payload))
+        max_raw_chars = int_value(cfg.get("max_raw_hook_input_chars")) or DEFAULT_MAX_RAW_HOOK_INPUT_CHARS
+        raw_hook_input = scrub_sensitive(event_specific_payload(payload))
+        event["raw_hook_input"] = truncate_large_strings(raw_hook_input, max_raw_chars)
 
     if is_session_stop_hook(hook_event_name):
         workspace_diff = git_workspace_diff(str(cwd) if cwd else None)
@@ -937,9 +1006,10 @@ def append_jsonl(directory: Path, event: dict[str, Any]) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     day = dt.datetime.now().strftime("%Y-%m-%d")
     path = directory / f"{day}.jsonl"
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json_dumps(event, ensure_ascii=False, sort_keys=True, default=str))
-        fh.write("\n")
+    line = json_dumps(event, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+    with sidecar_lock(path):
+        with path.open("a", encoding="utf-8", newline="\n") as fh:
+            fh.write(line)
     return path
 
 
@@ -968,22 +1038,23 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 
 def write_new_snapshots(snapshots: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
     path = state_path(cfg)
-    state = load_state(path)
-    local_known = set(str(item) for item in state.get("snapshot_ids", []))
-    remote_known = set(str(item) for item in state.get("remote_snapshot_ids", []))
-    upload_candidates: list[dict[str, Any]] = []
-    snapshot_dir = Path(str(cfg.get("snapshot_log_dir") or DEFAULT_HOME / "snapshots")).expanduser()
-    for snapshot in snapshots:
-        snapshot_id = str(snapshot.get("snapshot_id"))
-        if snapshot_id not in local_known:
-            append_jsonl(snapshot_dir, snapshot)
-            local_known.add(snapshot_id)
-        if snapshot_id not in remote_known:
-            upload_candidates.append(snapshot)
-    state["snapshot_ids"] = sorted(local_known)
-    state["remote_snapshot_ids"] = sorted(remote_known)
-    save_state(path, state)
-    return upload_candidates
+    with sidecar_lock(path):
+        state = load_state(path)
+        local_known = set(str(item) for item in state.get("snapshot_ids", []))
+        remote_known = set(str(item) for item in state.get("remote_snapshot_ids", []))
+        upload_candidates: list[dict[str, Any]] = []
+        snapshot_dir = Path(str(cfg.get("snapshot_log_dir") or DEFAULT_HOME / "snapshots")).expanduser()
+        for snapshot in snapshots:
+            snapshot_id = str(snapshot.get("snapshot_id"))
+            if snapshot_id not in local_known:
+                append_jsonl(snapshot_dir, snapshot)
+                local_known.add(snapshot_id)
+            if snapshot_id not in remote_known:
+                upload_candidates.append(snapshot)
+        state["snapshot_ids"] = sorted(local_known)
+        state["remote_snapshot_ids"] = sorted(remote_known)
+        save_state(path, state)
+        return upload_candidates
 
 
 def mark_remote_snapshot_known(snapshot: dict[str, Any], cfg: dict[str, Any]) -> None:
@@ -991,11 +1062,12 @@ def mark_remote_snapshot_known(snapshot: dict[str, Any], cfg: dict[str, Any]) ->
     if not snapshot_id:
         return
     path = state_path(cfg)
-    state = load_state(path)
-    remote_known = set(str(item) for item in state.get("remote_snapshot_ids", []))
-    remote_known.add(str(snapshot_id))
-    state["remote_snapshot_ids"] = sorted(remote_known)
-    save_state(path, state)
+    with sidecar_lock(path):
+        state = load_state(path)
+        remote_known = set(str(item) for item in state.get("remote_snapshot_ids", []))
+        remote_known.add(str(snapshot_id))
+        state["remote_snapshot_ids"] = sorted(remote_known)
+        save_state(path, state)
 
 
 def assign_event_sequence(event: dict[str, Any], cfg: dict[str, Any]) -> None:
@@ -1003,17 +1075,18 @@ def assign_event_sequence(event: dict[str, Any], cfg: dict[str, Any]) -> None:
     if not isinstance(timeline, dict) or timeline.get("sequence_no") is not None:
         return
     path = state_path(cfg)
-    state = load_state(path)
-    sequences = state.setdefault("session_sequences", {})
-    if not isinstance(sequences, dict):
-        sequences = {}
-        state["session_sequences"] = sequences
-    session_id = str(event.get("session_id") or timeline.get("trace_id") or "unknown")
-    next_value = int_value(sequences.get(session_id)) or 0
-    next_value += 1
-    timeline["sequence_no"] = next_value
-    sequences[session_id] = next_value
-    save_state(path, state)
+    with sidecar_lock(path):
+        state = load_state(path)
+        sequences = state.setdefault("session_sequences", {})
+        if not isinstance(sequences, dict):
+            sequences = {}
+            state["session_sequences"] = sequences
+        session_id = str(event.get("session_id") or timeline.get("trace_id") or "unknown")
+        next_value = int_value(sequences.get(session_id)) or 0
+        next_value += 1
+        timeline["sequence_no"] = next_value
+        sequences[session_id] = next_value
+        save_state(path, state)
 
 
 def upload_headers(cfg: dict[str, Any]) -> dict[str, str]:
@@ -1227,7 +1300,8 @@ def maybe_emit_skill_update_notice(payload: dict[str, Any], cfg: dict[str, Any])
     state["last_notified_at"] = utc_now()
     state["last_notified_epoch"] = now
     try:
-        save_state(state_file, state)
+        with sidecar_lock(state_file):
+            save_state(state_file, state)
     except Exception:
         return
 
