@@ -128,6 +128,8 @@ def installer_args(cfg: dict[str, Any], selection: str, manifest_url_value: str,
     skill_update = cfg.get("skill_update")
     if isinstance(skill_update, dict) and skill_update.get("enabled") is False:
         args.append("--no-skill-update-check")
+    if isinstance(skill_update, dict) and skill_update.get("auto_update") is True:
+        args.append("--auto-skill-update")
     codex_backfill = cfg.get("codex_history_backfill")
     if isinstance(codex_backfill, dict) and codex_backfill.get("enabled") is False:
         args.append("--no-auto-codex-backfill")

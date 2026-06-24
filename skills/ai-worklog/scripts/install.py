@@ -378,6 +378,8 @@ def update_config(args: argparse.Namespace, dry_run: bool) -> dict[str, Any]:
         "manifest_url": args.skill_update_manifest_url,
         "source_url": args.skill_source_url,
         "trigger_interval_seconds": args.skill_update_trigger_interval_seconds,
+        "auto_update": args.auto_skill_update,
+        "self_heal_enabled": True,
     }
     if args.backfill_limit is not None:
         cfg["codex_history_backfill"]["limit"] = args.backfill_limit
@@ -636,6 +638,7 @@ def main() -> int:
         help="Minimum seconds between background remote skill version checks.",
     )
     parser.add_argument("--no-skill-update-check", action="store_true", help="Disable background remote skill version checks.")
+    parser.add_argument("--auto-skill-update", action="store_true", help="Opt in to automatic background skill updates from SessionStart hooks.")
     parser.add_argument("--smoke-test", action="store_true", help="After installing, execute installed hooks with a synthetic doctor event.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

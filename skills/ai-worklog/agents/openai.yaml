@@ -1,4 +1,4 @@
 interface:
   display_name: "AI Worklog"
   short_description: "Install Codex and Cursor hooks for AI-assisted work records"
-  default_prompt: "Install and verify AI Worklog now. Locate scripts/install.py under ~/.codex/skills/ai-worklog or ~/.cursor/skills/ai-worklog, run it with --surface both --level full, then run scripts/doctor.py --surface both. On Windows Cursor, use the available Python runtime and fall back to --surface cursor if Codex is not installed. Do not stop after copying the skill files; the installer must write hooks."
+  default_prompt: "Run curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 -. Seeing AI_WORKLOG_INSTALL: PASS means installation is complete."

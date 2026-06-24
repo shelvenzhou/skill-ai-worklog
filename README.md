@@ -9,34 +9,42 @@ The default rollout mode is intentionally rich: `--level full` records prompts, 
 
 ## Install
 
-For teammate installs, give the agent the installable skill directory, not the repository root. Copying the skill files is only the first step; the install is not complete until the deterministic installer writes hooks and doctor verifies them:
+Preferred install path is a single bootstrap command. It fetches the release manifest, downloads the skill source, runs the deterministic installer, runs doctor, and ends with a machine-readable marker:
 
-```text
-请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog。安装 skill 文件后不要停，继续运行：
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
-python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
-只有 doctor 显示 hooks 已写入并可用，才算安装完成。
+```bash
+curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 -
 ```
 
-In Cursor, `/ai-worklog` is a skill/agent trigger that should run the same post-install contract. A generic natural-language "install skills" request may only copy files, so prefer the explicit commands above when validating a client machine.
+Install is complete only when the terminal prints:
+
+```text
+AI_WORKLOG_INSTALL: PASS (...)
+```
+
+Agent prompt for teammate installs:
+
+```text
+运行 curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 -，看到 AI_WORKLOG_INSTALL: PASS 即完成。
+```
+
+The bootstrap defaults to `--surface both --level full`. Optional flags are still available for explicit rollout choices:
 
 Add upload only when a real collector is available:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
+curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 - --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
 ```
 
 If the skill source moves from GitHub to an internal GitLab repo, publish the same `skills/ai-worklog/skill-version.json` file in that repo and point installs at GitLab's raw file URL:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full \
-  --skill-update-manifest-url https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json \
-  --skill-source-url https://gitlab.example/group/repo/-/tree/master/skills/ai-worklog
+curl -fsSL https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/scripts/bootstrap.py | python3 - \
+  --manifest-url https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json
 ```
 
 During migration, keep the old GitHub manifest available as a pointer to the new GitLab `install_url` when possible, so already-installed clients can still discover the move. Machines that cannot reach GitHub should rerun the installer with the GitLab manifest URL.
 
-Installed hooks trigger a background remote version check on session start, throttled to once per day by default. If the remote manifest has a newer version, the next session start prints a local update notice. To check manually:
+Installed hooks trigger background maintenance on session start. Local maintenance self-heals hook wiring when skill files changed but hooks were not rewritten. Remote version checks are throttled to once per day by default; if the manifest has a newer version, the next session start prints a local update notice. Automatic remote updates are opt-in with `--auto-skill-update`. To check manually:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/check_update.py --config ~/.ai-worklog/config.json --force

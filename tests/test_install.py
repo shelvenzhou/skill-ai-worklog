@@ -435,6 +435,7 @@ class InstallScriptTests(unittest.TestCase):
                 skill_update_manifest_url="https://example.com/manifest.json",
                 skill_source_url="https://example.com/skill",
                 skill_update_trigger_interval_seconds=86400,
+                auto_skill_update=True,
                 no_auto_codex_backfill=False,
                 backfill_batch_size=250,
                 backfill_trigger_interval_seconds=86400,
@@ -472,6 +473,8 @@ class InstallScriptTests(unittest.TestCase):
                     "manifest_url": "https://example.com/manifest.json",
                     "source_url": "https://example.com/skill",
                     "trigger_interval_seconds": 86400,
+                    "auto_update": True,
+                    "self_heal_enabled": True,
                 },
             )
             self.assertEqual(
@@ -517,6 +520,7 @@ class InstallScriptTests(unittest.TestCase):
                 skill_update_manifest_url="https://example.com/manifest.json",
                 skill_source_url="https://example.com/skill",
                 skill_update_trigger_interval_seconds=86400,
+                auto_skill_update=False,
                 no_auto_codex_backfill=False,
                 backfill_batch_size=250,
                 backfill_trigger_interval_seconds=86400,
@@ -563,6 +567,7 @@ class InstallScriptTests(unittest.TestCase):
                 skill_update_manifest_url="https://example.com/manifest.json",
                 skill_source_url="https://example.com/skill",
                 skill_update_trigger_interval_seconds=86400,
+                auto_skill_update=False,
                 no_auto_codex_backfill=False,
                 backfill_batch_size=250,
                 backfill_trigger_interval_seconds=86400,

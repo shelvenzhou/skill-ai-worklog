@@ -61,7 +61,11 @@ class UpdateSkillTests(unittest.TestCase):
                         "server_url": "http://collector/events",
                         "api_key_env": "TOKEN_ENV",
                         "request_timeout_seconds": 1.5,
-                        "skill_update": {"current_version": "0.1.0", "manifest_url": "https://example.test/manifest.json"},
+                        "skill_update": {
+                            "current_version": "0.1.0",
+                            "manifest_url": "https://example.test/manifest.json",
+                            "auto_update": True,
+                        },
                     }
                 )
                 + "\n",
@@ -113,6 +117,7 @@ class UpdateSkillTests(unittest.TestCase):
                 self.assertIn("http://collector/events", calls[0])
                 self.assertIn("--api-key-env", calls[0])
                 self.assertIn("TOKEN_ENV", calls[0])
+                self.assertIn("--auto-skill-update", calls[0])
             finally:
                 if old_home is None:
                     os.environ.pop("CODEX_HOME", None)

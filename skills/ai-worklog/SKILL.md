@@ -7,86 +7,64 @@ description: Install and operate an internal AI-assisted worklog for Codex and C
 
 ## Objective
 
-Install a local worklog that turns Codex and Cursor hook events into structured AI-assisted work records. Installing the skill files alone is not enough: `install.py` must write Codex/Cursor hook config.
+Install a local worklog that turns Codex and Cursor hook events into structured AI-assisted work records. The supported install path is the bootstrap command, which fetches skill files, runs `install.py`, runs `doctor.py`, and prints one final `AI_WORKLOG_INSTALL` marker.
 
 The default internal mode is `full`, which records prompt text, agent responses exposed to hooks, tool inputs/results, compact environment/session snapshots, and best-effort token usage from Codex transcripts. Use `diagnostic`, `basic`, or `off` when the user asks to reduce collection.
 
 ## Completion Contract
 
-Treat ai-worklog installation as incomplete until all deterministic steps have run:
+Treat ai-worklog installation as incomplete until bootstrap prints:
 
-1. The skill files exist under the target skill directory.
-2. `scripts/install.py` has run for the requested surface and written hook config.
-3. `scripts/doctor.py` has run and reported whether the install is usable.
+```text
+AI_WORKLOG_INSTALL: PASS (...)
+```
 
-Generic skill installation only copies files. It does not prove that hooks were injected. If the user asks an agent to "install ai-worklog" or invokes `/ai-worklog`, continue past file installation and run the installer plus doctor. Do not report success just because `skill-installer` completed.
+If bootstrap prints `AI_WORKLOG_INSTALL: FAIL: ...`, report the failure and do not claim installation succeeded. Generic skill installation only copies files and is not the preferred install path.
 
 ## Install
-
-If this skill is not installed yet and the user points to GitHub, install the skill directory, not the repository root:
-
-- repo: `shelvenzhou/skill-ai-worklog`
-- ref: `master`
-- path: `skills/ai-worklog`
-- URL: `https://github.com/shelvenzhou/skill-ai-worklog/tree/master/skills/ai-worklog`
-
-Do not pass the bare repository URL to `skill-installer --url`; it requires `--path` for this repository. Do not assume the branch is `main`.
-
-Run scripts with `python3`; executable bits may not survive GitHub install. If `~/.codex/skills/ai-worklog` already exists, skip copying and run its installer directly. On Windows Cursor hosts, run the installer from an environment that has Python available because Cursor does not provide a bundled Python runtime.
 
 Default local-only install:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full
+curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 -
 ```
 
-Then verify from the same client machine:
+Agent prompt for teammate installs:
+
+```text
+运行 curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 -，看到 AI_WORKLOG_INSTALL: PASS 即完成。
+```
+
+Bootstrap defaults to `--surface both --level full`. On Windows Cursor hosts, run the command from an environment that has Python available because Cursor does not provide a bundled Python runtime:
+
+```powershell
+iwr https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py -UseBasicParsing | python - --surface cursor
+```
+
+Check whether the installed skill is actually wired up and healthy after bootstrap:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
-```
-
-Windows Cursor install:
-
-```powershell
-$installer = "$HOME\.codex\skills\ai-worklog\scripts\install.py"
-if (!(Test-Path $installer)) { $installer = "$HOME\.cursor\skills\ai-worklog\scripts\install.py" }
-python $installer --surface cursor --level full
-```
-
-Then verify Cursor:
-
-```powershell
-$doctor = "$HOME\.codex\skills\ai-worklog\scripts\doctor.py"
-if (!(Test-Path $doctor)) { $doctor = "$HOME\.cursor\skills\ai-worklog\scripts\doctor.py" }
-python $doctor --surface cursor
+python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --json
 ```
 
 Company-internal install with upload:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
+curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 - --server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY
 ```
 
 If the source moves from GitHub to an internal GitLab repo, keep publishing `skills/ai-worklog/skill-version.json` and configure the installed skill with GitLab URLs:
 
 ```bash
-python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full \
-  --skill-update-manifest-url https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json \
-  --skill-source-url https://gitlab.example/group/repo/-/tree/master/skills/ai-worklog
+curl -fsSL https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/scripts/bootstrap.py | python3 - \
+  --manifest-url https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json
 ```
 
-The version check is provider-agnostic: it reads the raw JSON manifest and compares `version`. Installed hooks trigger a background check on session start, throttled to once per day by default, and print a local notice on a later session start when a newer remote version is found. Check manually when needed:
+The version check is provider-agnostic: it reads the raw JSON manifest and compares `version`. Installed hooks trigger background maintenance on session start. Local maintenance self-heals hook wiring when skill files changed but hooks were not rewritten. Remote checks are throttled to once per day by default and print a local notice on a later session start when a newer remote version is found. Automatic remote updates are opt-in with bootstrap's `--auto-skill-update`. Check manually when needed:
 
 ```bash
 python3 ~/.codex/skills/ai-worklog/scripts/check_update.py --config ~/.ai-worklog/config.json --force
-```
-
-Check whether the installed skill is actually wired up and healthy:
-
-```bash
-python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both
-python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --json
 ```
 
 Use `--smoke-write` only when an explicit end-to-end hook write test is needed; it records one local diagnostic event with `source_id=ai-worklog-doctor`.
@@ -259,10 +237,10 @@ python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both --smoke-writ
 After publishing this skill internally, teammates should only need:
 
 ```text
-请用 skill-installer 从 shelvenzhou/skill-ai-worklog 的 master 分支安装 skills/ai-worklog。安装 skill 文件后不要停，继续运行 python3 ~/.codex/skills/ai-worklog/scripts/install.py --surface both --level full，然后运行 python3 ~/.codex/skills/ai-worklog/scripts/doctor.py --surface both。只有 doctor 显示 hooks 已写入并可用，才算安装完成。
+运行 curl -fsSL https://raw.githubusercontent.com/shelvenzhou/skill-ai-worklog/master/skills/ai-worklog/scripts/bootstrap.py | python3 -，看到 AI_WORKLOG_INSTALL: PASS 即完成。
 ```
 
-Add `--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY` only when upload to a known collector is required.
+Add `--server-url <COLLECTOR_URL>/events --api-key-env AI_WORKLOG_API_KEY` after `python3 -` only when upload to a known collector is required.
 
 ## Notes
 

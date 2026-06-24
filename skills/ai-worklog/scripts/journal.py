@@ -161,6 +161,8 @@ def default_config() -> dict[str, Any]:
             "current_version": VERSION,
             "trigger_interval_seconds": 24 * 60 * 60,
             "notify_interval_seconds": 24 * 60 * 60,
+            "auto_update": False,
+            "self_heal_enabled": True,
         },
         "max_transcript_bytes": DEFAULT_MAX_TRANSCRIPT_BYTES,
         "max_raw_hook_input_chars": DEFAULT_MAX_RAW_HOOK_INPUT_CHARS,
@@ -1332,6 +1334,40 @@ def maybe_spawn_skill_update_check(payload: dict[str, Any], cfg: dict[str, Any],
         return
 
 
+def skill_self_heal_enabled(cfg: dict[str, Any]) -> bool:
+    section = skill_update_config(cfg)
+    return section.get("self_heal_enabled") is not False
+
+
+def maybe_spawn_skill_maintenance(payload: dict[str, Any], cfg: dict[str, Any], surface: str, config_path: Path) -> None:
+    if os.environ.get("AI_WORKLOG_DISABLE_BACKGROUND"):
+        return
+    hook_event_name = str(
+        value_at(payload, "hook_event_name", "event", "event_name", "hookName")
+        or first_nested(payload, [["hook", "event"], ["metadata", "hook_event_name"]])
+        or ""
+    )
+    if not is_session_start_hook(hook_event_name):
+        return
+    if not skill_update_enabled(cfg) and not skill_self_heal_enabled(cfg):
+        return
+    script = Path(__file__).resolve().with_name("skill_maintenance_trigger.py")
+    if not script.exists():
+        return
+    selection = surface if surface in {"codex", "cursor", "both"} else "both"
+    try:
+        subprocess.Popen(
+            [sys.executable or "python3", str(script), "--surface", selection, "--config", str(config_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=platform_io.utf8_subprocess_env(),
+            start_new_session=True,
+        )
+    except Exception:
+        return
+
+
 def main() -> int:
     platform_io.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Record one Codex/Cursor hook event.")
@@ -1370,7 +1406,7 @@ def main() -> int:
         maybe_spawn_async_upload(cfg, config_path)
 
     maybe_spawn_codex_backfill(payload, cfg, args.surface, config_path)
-    maybe_spawn_skill_update_check(payload, cfg, config_path)
+    maybe_spawn_skill_maintenance(payload, cfg, args.surface, config_path)
     return 0
 
 
