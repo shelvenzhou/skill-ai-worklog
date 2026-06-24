@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -146,6 +147,27 @@ class InstallScriptTests(unittest.TestCase):
             path.write_text('{"hooks": {}}\n', encoding="utf-8-sig")
 
             self.assertEqual(installer.read_json(path), {"hooks": {}})
+
+    def test_write_json_keeps_existing_file_when_atomic_replace_fails(self) -> None:
+        installer = load_installer()
+        original_replace = installer.os.replace
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.json"
+            original = {"version": 1, "hooks": {"sessionStart": [{"command": "python old.py"}]}}
+            path.write_text(json.dumps(original) + "\n", encoding="utf-8")
+
+            def fail_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+                raise OSError("replace failed")
+
+            try:
+                installer.os.replace = fail_replace
+                with self.assertRaises(OSError):
+                    installer.write_json(path, {"version": 1, "hooks": {}}, dry_run=False)
+            finally:
+                installer.os.replace = original_replace
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+            self.assertFalse(list(Path(tmp).glob(".hooks.json.tmp-*")))
 
     def test_windows_upgrade_rewrites_existing_hooks_without_bom(self) -> None:
         installer = load_installer()

@@ -62,7 +62,20 @@ def write_json(path: Path, value: dict[str, Any], dry_run: bool) -> None:
     if dry_run:
         print(f"[dry-run] would write {path}:\n{data}")
         return
-    platform_io.write_text_with_backup(path, data + "\n")
+    backup = platform_io.backup_existing(path)
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        platform_io.write_text(tmp_path, data + "\n")
+        json.loads(platform_io.read_text(tmp_path, encoding="utf-8"))
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    if backup:
+        print(f"Backed up existing JSON {path} to {backup}")
 
 
 def source_skill_dir() -> Path:
