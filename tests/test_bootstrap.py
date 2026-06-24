@@ -105,18 +105,45 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn("--skill-update-manifest-url", commands[0])
             self.assertEqual(len(commands), 2)
 
-    def test_merged_manifest_falls_back_to_baked_source_fields(self) -> None:
+    def test_merged_manifest_falls_back_to_baked_source_fields_when_allowed(self) -> None:
         bootstrap = load_script("bootstrap")
         old_fetch = bootstrap.fetch_manifest
         try:
             bootstrap.fetch_manifest = lambda url, timeout: (_ for _ in ()).throw(OSError("offline"))
-            manifest = bootstrap.merged_manifest("https://example.test/manifest.json", 1.0)
+            manifest = bootstrap.merged_manifest("https://example.test/manifest.json", 1.0, allow_fallback=True)
         finally:
             bootstrap.fetch_manifest = old_fetch
 
         self.assertEqual(manifest["repo"], "shelvenzhou/skill-ai-worklog")
         self.assertEqual(manifest["ref"], "master")
         self.assertEqual(manifest["path"], "skills/ai-worklog")
+
+    def test_explicit_manifest_fetch_failure_does_not_fall_back_to_default_source(self) -> None:
+        bootstrap = load_script("bootstrap")
+        old_fetch = bootstrap.fetch_manifest
+        old_download = bootstrap.download_archive
+        try:
+            bootstrap.fetch_manifest = lambda url, timeout: (_ for _ in ()).throw(OSError("offline"))
+            bootstrap.download_archive = lambda url, target, timeout: (_ for _ in ()).throw(AssertionError("download should not run"))
+            args = argparse.Namespace(
+                surface="both",
+                level="full",
+                hook_set="minimal",
+                manifest_url="https://gitlab.example/group/repo/-/raw/master/skills/ai-worklog/skill-version.json",
+                server_url=None,
+                api_key_env="AI_WORKLOG_API_KEY",
+                auto_skill_update=False,
+                timeout=1.0,
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                rc = bootstrap.bootstrap(args)
+        finally:
+            bootstrap.fetch_manifest = old_fetch
+            bootstrap.download_archive = old_download
+
+        self.assertEqual(rc, 1)
+        self.assertIn("AI_WORKLOG_INSTALL: FAIL: download failed: offline", stdout.getvalue())
 
 
 if __name__ == "__main__":

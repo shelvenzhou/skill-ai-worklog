@@ -54,11 +54,13 @@ def fetch_manifest(url: str, timeout: float) -> dict[str, Any]:
     return value
 
 
-def merged_manifest(url: str, timeout: float) -> dict[str, Any]:
+def merged_manifest(url: str, timeout: float, *, allow_fallback: bool = False) -> dict[str, Any]:
     manifest = dict(DEFAULT_MANIFEST)
     try:
         manifest.update(fetch_manifest(url, timeout))
     except Exception as exc:
+        if not allow_fallback:
+            raise
         print(f"AI Worklog bootstrap: manifest fetch failed; using baked source fields: {exc}", file=sys.stderr)
     return manifest
 
@@ -198,11 +200,12 @@ def install_args(args: argparse.Namespace, manifest_url_value: str, source_url: 
 
 
 def bootstrap(args: argparse.Namespace) -> int:
+    explicit_manifest_url = bool(args.manifest_url or os.environ.get("AI_WORKLOG_UPDATE_MANIFEST_URL"))
     manifest_url_value = args.manifest_url or os.environ.get("AI_WORKLOG_UPDATE_MANIFEST_URL") or DEFAULT_MANIFEST_URL
     with tempfile.TemporaryDirectory(prefix="ai-worklog-bootstrap-") as tmp:
         workdir = Path(tmp)
         try:
-            manifest = merged_manifest(manifest_url_value, args.timeout)
+            manifest = merged_manifest(manifest_url_value, args.timeout, allow_fallback=not explicit_manifest_url)
             archive = archive_url(manifest)
             path_in_archive = manifest_path(manifest)
             archive_file = workdir / "skill.tar.gz"
